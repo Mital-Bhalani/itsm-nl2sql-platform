@@ -1,21 +1,25 @@
 """
 Build db/tickets.sqlite from db/schema.sql and fill it with synthetic ITSM data.
 
-    python db/seed.py
+    python db/seed.py                                    # default sample: 500 / 100
+    python db/seed.py --incidents 50000 --changes 10000 --out db/tickets_large.sqlite
 
 The output is deterministic: one seeded random generator and a fixed anchor date
-(NOW), so every run produces exactly the same rows.
+(NOW), so every run with the same arguments produces exactly the same rows.
 
-What gets generated:
+What gets generated (defaults in brackets):
     5 assignment groups, 40 users, 4 SLA targets,
-    500 incidents over the 180 days before NOW,
-    100 changes (about 90 in the past 180 days, about 10 scheduled in the next 28 days).
+    N incidents [500] over the 180 days before NOW: 88% resolved/closed, 2% cancelled,
+        the rest still open,
+    M changes [100]: 90% in the past 180 days, 10% scheduled in the next 28 days.
+Counts scale with N and M; the ratios, users and reference data do not.
 
 Exactly 15% of resolved/closed incidents breach their SLA target, measured as
 wall-clock minutes from opened_at to resolved_at (see the schema.sql header).
 Breaches are weighted toward Network and Database so groups differ.
 """
 
+import argparse
 import random
 import sqlite3
 from datetime import datetime, timedelta
@@ -30,23 +34,22 @@ NOW = datetime(2026, 9, 28, 0, 0, 0)  # fixed anchor, UTC
 WINDOW_START = NOW - timedelta(days=180)
 TS_FORMAT = "%Y-%m-%d %H:%M:%S"
 
-N_INCIDENTS = 500
-N_RESOLVED = 440  # Resolved or Closed
-N_CANCELLED = 10
-N_OPEN = N_INCIDENTS - N_RESOLVED - N_CANCELLED  # New / In Progress / On Hold
-BREACH_RATE = 0.15
+N_INCIDENTS = 500      # default; --incidents
+RESOLVED_SHARE = 0.88  # Resolved or Closed
+CANCELLED_SHARE = 0.02
+BREACH_RATE = 0.15     # of resolved/closed incidents, exact
 
-N_PAST_CHANGES = 90
-N_FUTURE_CHANGES = 10
+N_CHANGES = 100        # default; --changes
+PAST_CHANGE_SHARE = 0.90
 
-# Future changes pinned to High risk so "high-risk changes next week" (eval question 5) has
-# data under both readings of "next week": the as-of week and the following calendar week.
-# Applied after generation, with no extra random draws, so every other row is unchanged.
-# change id -> planned_start (4-hour window, status Scheduled)
-PINNED_HIGH_RISK_CHANGES = {
-    91: datetime(2026, 10, 1, 21, 0, 0),  # Thursday of the as-of week
-    92: datetime(2026, 10, 7, 21, 0, 0),  # Wednesday of the following calendar week
-}
+# The first two future changes are pinned to High risk so "high-risk changes next week"
+# (eval question 5) has data under both readings of "next week": the as-of week and the
+# following calendar week. Applied after generation, with no extra random draws, so every
+# other row is unchanged. planned_start per pinned change (4-hour window, status Scheduled):
+PINNED_HIGH_RISK_STARTS = [
+    datetime(2026, 10, 1, 21, 0, 0),  # Thursday of the as-of week
+    datetime(2026, 10, 7, 21, 0, 0),  # Wednesday of the following calendar week
+]
 
 rng = random.Random(SEED)
 
@@ -247,9 +250,12 @@ def make_users():
     ]
 
 
-def make_incidents():
+def make_incidents(n_incidents):
     # Fix the status bucket of every incident first so the counts are exact.
-    buckets = ["resolved"] * N_RESOLVED + ["cancelled"] * N_CANCELLED + ["open"] * N_OPEN
+    n_resolved = round(RESOLVED_SHARE * n_incidents)
+    n_cancelled = round(CANCELLED_SHARE * n_incidents)
+    n_open = n_incidents - n_resolved - n_cancelled  # New / In Progress / On Hold
+    buckets = ["resolved"] * n_resolved + ["cancelled"] * n_cancelled + ["open"] * n_open
     rng.shuffle(buckets)
 
     drafts = []
@@ -310,10 +316,11 @@ def make_incidents():
     return rows
 
 
-def make_changes():
+def make_changes(n_changes):
+    n_past = round(PAST_CHANGE_SHARE * n_changes)
     rows = []
-    for change_id in range(1, N_PAST_CHANGES + N_FUTURE_CHANGES + 1):
-        is_future = change_id > N_PAST_CHANGES
+    for change_id in range(1, n_changes + 1):
+        is_future = change_id > n_past
         group_id = weighted(CHANGE_GROUP_WEIGHTS)
         risk = weighted(RISK_WEIGHTS)
         low, high = CHANGE_DURATION[risk]
@@ -345,7 +352,8 @@ def make_changes():
             ts(start + duration),
         ))
 
-    for change_id, start in PINNED_HIGH_RISK_CHANGES.items():
+    for offset, start in enumerate(PINNED_HIGH_RISK_STARTS, start=1):
+        change_id = n_past + offset  # the first future changes (91 and 92 at the default size)
         _, description, _, _, group_id, _, _ = rows[change_id - 1]
         rows[change_id - 1] = (
             change_id, description, "High", "Scheduled", group_id,
@@ -357,18 +365,37 @@ def make_changes():
 # -----------------------------------------------------------------------------
 #  Build
 # -----------------------------------------------------------------------------
-def main():
-    if DB_PATH.exists():
-        DB_PATH.unlink()
+def parse_args():
+    parser = argparse.ArgumentParser(description="Build the synthetic ITSM database.")
+    parser.add_argument("--incidents", type=int, default=N_INCIDENTS,
+                        help=f"number of incidents (default {N_INCIDENTS}, minimum 100)")
+    parser.add_argument("--changes", type=int, default=N_CHANGES,
+                        help=f"number of changes (default {N_CHANGES}, minimum 20)")
+    parser.add_argument("--out", type=Path, default=DB_PATH,
+                        help="database file to create (default db/tickets.sqlite)")
+    args = parser.parse_args()
+    if args.incidents < 100:
+        parser.error("--incidents must be at least 100")
+    if args.changes < 20:
+        parser.error("--changes must be at least 20 (the two pinned High-risk changes need "
+                     "future change ids)")
+    return args
 
-    conn = sqlite3.connect(DB_PATH)
+
+def main():
+    args = parse_args()
+    db_path = args.out.resolve()
+    if db_path.exists():
+        db_path.unlink()
+
+    conn = sqlite3.connect(db_path)
     conn.execute("PRAGMA foreign_keys = ON")
     conn.executescript(SCHEMA_PATH.read_text(encoding="utf-8"))
 
     # Generate in a fixed order so the random draws are always the same.
     users = make_users()
-    incidents = make_incidents()
-    changes = make_changes()
+    incidents = make_incidents(args.incidents)
+    changes = make_changes(args.changes)
 
     with conn:
         conn.executemany("INSERT INTO assignment_groups VALUES (?, ?)", GROUPS.items())
@@ -377,10 +404,10 @@ def main():
         conn.executemany("INSERT INTO incidents VALUES (?, ?, ?, ?, ?, ?, ?, ?)", incidents)
         conn.executemany("INSERT INTO changes VALUES (?, ?, ?, ?, ?, ?, ?)", changes)
 
-    print(f"Built {DB_PATH.name}")
+    print(f"Built {db_path.name}")
     for table in ["assignment_groups", "users", "sla_targets", "incidents", "changes"]:
         count = conn.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]
-        print(f"  {table:<18} {count:>4}")
+        print(f"  {table:<18} {count:>6}")
 
     breached, resolved = conn.execute("""
         SELECT SUM((julianday(i.resolved_at) - julianday(i.opened_at)) * 1440 > s.target_minutes),

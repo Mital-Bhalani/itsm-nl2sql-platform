@@ -1,10 +1,21 @@
 # agent/
 
-**Now:** `naive_spike.py` — the Day 1 naive spike. It sends one hard-coded question to the OpenAI
-API with no schema context and no guardrails, and prints whatever SQL comes back without validating
-or running it. It exists to show why the naive approach fails. Run: `python agent/naive_spike.py`
-(needs `OPENAI_API_KEY` in the project-root `.env`).
+**`nl2sql.py`** — the NL2SQL agent. It finds the business terms in a question using the semantic
+catalog, builds the prompt entirely from the `meta_*` tables, asks the OpenAI API for one SQLite
+query, and applies the guardrails (SELECT-only, single statement, read-only database, automatic
+`LIMIT 1000`, no personal data). Questions about things the data does not record, such as an
+incident's assignee, are refused before any API call.
 
-**Filled on Day 2–3.** This will hold the **NL2SQL agent loop**: the code that takes a plain-English
-question, pulls in the semantic layer, prompts the OpenAI API for SQL, validates it (SELECT-only,
-auto-LIMIT, PII masking), runs it read-only, and turns the rows back into a plain-English answer.
+```
+python agent/nl2sql.py "which assignment groups breached SLA most last month?"
+```
+
+Needs `OPENAI_API_KEY` in the project-root `.env`, and the database and catalog built first
+(`python db/seed.py`, `python semantics/build_catalog.py`).
+
+**`naive_spike.py`** — the Day 1 naive spike. It sends one hard-coded question to the OpenAI API
+with no schema context and no guardrails, and prints whatever comes back. It exists to show why
+the naive approach fails (invented tables, wrong SQL dialect, the real clock instead of the data's
+as-of date).
+
+**Still to come:** turning the result rows into a plain-English answer shown alongside the SQL.

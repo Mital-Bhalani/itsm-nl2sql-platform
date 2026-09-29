@@ -3,6 +3,7 @@ Build the semantic catalog (meta_* tables) inside db/tickets.sqlite.
 
     python db/seed.py                  # build the data first (it recreates the file)
     python semantics/build_catalog.py
+    python semantics/build_catalog.py --db db/tickets_large.sqlite   # any other database
 
 Creates five tables:
     meta_tables    one row per data table: what it holds and its grain
@@ -11,7 +12,12 @@ Creates five tables:
     meta_metrics   named metrics with the SQL expression that computes them
     meta_joins     the valid join paths between data tables
 
-meta_columns, meta_metrics and meta_glossary are populated for now.
+All five tables are populated.
+
+meta_tables: what each data table holds and what one row represents (TABLE_DRAFTS).
+
+meta_joins: one row per foreign key in schema.sql, with cardinality and pitfalls
+(JOINS). The build fails if JOINS and the schema's foreign keys disagree.
 
 meta_columns: structure (types, nullability, keys, foreign keys, CHECK lists) is
 read from db/schema.sql; descriptions, example values and synonyms are drafted by
@@ -31,6 +37,7 @@ Relative time terms are anchored to AS_OF, the fixed "today" of the sample data
 (NOW in db/seed.py).
 """
 
+import argparse
 import re
 import sqlite3
 import sys
@@ -317,8 +324,10 @@ GLOSSARY = [
          "An open incident that is paused, for example waiting on the user or a supplier.",
          "i.status = 'On Hold'", related_columns="incidents.status"),
     term("resolved incident", "value", "resolved, fixed, done, completed, finished",
-         "An incident that has been fixed: status Resolved or Closed.",
-         "i.status IN ('Resolved', 'Closed')", related_columns="incidents.status"),
+         "An incident that has been fixed: status Resolved or Closed. 'Resolved <time window>' "
+         "(e.g. resolved last week) filters the window on i.resolved_at, not opened_at.",
+         "i.status IN ('Resolved', 'Closed')",
+         related_columns="incidents.status, incidents.resolved_at"),
     term("closed", "value", "closed incident, closed ticket",
          "Defaults to finished (Resolved or Closed), the same as resolved incident.",
          "i.status IN ('Resolved', 'Closed')", related_columns="incidents.status",
@@ -373,7 +382,8 @@ GLOSSARY = [
     term("SLA breach", "metric", "breach, breached, missed SLA, SLA miss, out of SLA, "
                                  "late, resolved late",
          "A resolved or closed incident that took longer than its SLA target. Rate: "
-         "sla_breach_rate. Count: SUM of the condition in sql_hint.",
+         "sla_breach_rate. Count: SUM of the condition in sql_hint. Time windows such as "
+         "'last month' filter on i.opened_at (the metric's time_column), not on resolved_at.",
          f"i.status IN ('Resolved', 'Closed') AND {RESOLVED_LATE}",
          metric_name="sla_breach_rate",
          related_columns="incidents.opened_at, incidents.resolved_at, sla_targets.target_minutes"),
@@ -439,6 +449,71 @@ GLOSSARY = [
          "An incident caused by a change. Incidents and changes are not linked.",
          answerable=False),
 ]
+# -----------------------------------------------------------------------------
+#  Table descriptions: table -> (description, grain)
+# -----------------------------------------------------------------------------
+TABLE_DRAFTS = {
+    "assignment_groups": (
+        "Support teams that own incidents and changes (Service Desk, Network, Database, "
+        "Application Support, Infrastructure). Join here to report anything 'by team'.",
+        "one row per team"),
+    "users": (
+        "People in the IT organisation with their role and team. Names are personal data: "
+        "never return users.name in answers. Incidents do not link to users.",
+        "one row per person"),
+    "sla_targets": (
+        "Resolution deadline in minutes for each incident priority (1 = Critical 240, "
+        "2 = High 480, 3 = Medium 2880, 4 = Low 7200).",
+        "one row per priority"),
+    "incidents": (
+        "Unplanned interruptions: what broke, its priority, status, owning team, when it was "
+        "opened and resolved, and how often it was reopened. SLA breach is derived by joining "
+        "sla_targets, not stored.",
+        "one row per incident"),
+    "changes": (
+        "Planned work on IT systems with risk level, status, owning team and a booked "
+        "(planned, not actual) time window. Not linked to incidents.",
+        "one row per change request"),
+}
+
+# -----------------------------------------------------------------------------
+#  Join paths: one per foreign key in schema.sql
+#  (left_table, left_column, right_table, right_column, cardinality, notes)
+# -----------------------------------------------------------------------------
+JOINS = [
+    ("incidents", "assignment_group_id", "assignment_groups", "id", "many-to-one",
+     "Team that owns the incident. Only join teams when the question asks for a result per "
+     "team or names a team; a single total needs no join. For per-team results, LEFT JOIN from "
+     "assignment_groups to keep teams with zero incidents, and put every condition on incidents "
+     "(status, dates, priority) and any further join such as sla_targets inside that LEFT JOIN "
+     "(its ON clause or a subquery). A WHERE on i.* or an INNER JOIN after it silently drops "
+     "the zero-count teams. Count incidents with COUNT(i.id), never COUNT(*): after a LEFT "
+     "JOIN, COUNT(*) counts the team row itself and returns 1 instead of 0."),
+    ("incidents", "priority", "sla_targets", "priority", "many-to-one",
+     "Required for SLA breach: compare resolution minutes with s.target_minutes."),
+    ("changes", "assignment_group_id", "assignment_groups", "id", "many-to-one",
+     "Team that carries out the change."),
+    ("users", "assignment_group_id", "assignment_groups", "id", "many-to-one",
+     "Team membership; NULL for managers and admins (use LEFT JOIN to keep them). Never join "
+     "users to incidents through the team: it multiplies every incident by the team's head "
+     "count and inflates counts."),
+]
+
+
+def check_tables_and_joins(columns):
+    """Fail loudly when table descriptions or join paths drift from schema.sql."""
+    tables = {c["table"] for c in columns}
+    problems = [f"no description for table {t}" for t in sorted(tables - set(TABLE_DRAFTS))]
+    problems += [f"description for unknown table {t}" for t in sorted(set(TABLE_DRAFTS) - tables)]
+    schema_fks = {(c["table"], c["column"], *c["references_to"].split("."))
+                  for c in columns if c["references_to"]}
+    drafted = {j[:4] for j in JOINS}
+    problems += [f"foreign key without a meta_joins row: {fk}" for fk in sorted(schema_fks - drafted)]
+    problems += [f"meta_joins row with no foreign key: {j}" for j in sorted(drafted - schema_fks)]
+    if problems:
+        sys.exit("Table/join problems:\n  " + "\n  ".join(problems))
+
+
 GLOSSARY_FIELDS = ["term", "kind", "synonyms", "definition", "sql_hint", "metric_name",
                    "related_columns", "is_answerable", "is_ambiguous", "ambiguity_note"]
 
@@ -476,7 +551,10 @@ METRICS = [
         "filters": FINISHED,
         "time_column": "i.opened_at",
         "notes": "Open incidents already past target are not counted. For a count of "
-                 "breaches use SUM instead of AVG. Multiply by 100 for a percentage.",
+                 "breaches use SUM instead of AVG. Rate or percentage questions: report "
+                 "ROUND(100.0 * <sql_expression>, 1) as a percentage. 'How many' or 'most "
+                 "breaches' questions: report the count SUM(CASE WHEN ... THEN 1 ELSE 0 END), "
+                 "never multiplied by 100.",
     },
     {
         "metric_name": "reopen_rate",
@@ -716,15 +794,20 @@ def check_drafts(columns):
 #  Build
 # -----------------------------------------------------------------------------
 def main():
-    if not DB_PATH.exists():
-        sys.exit(f"{DB_PATH} not found. Run: python db/seed.py")
+    parser = argparse.ArgumentParser(description="Build the meta_* semantic catalog.")
+    parser.add_argument("--db", type=Path, default=DB_PATH,
+                        help="database to add the catalog to (default db/tickets.sqlite)")
+    db_path = parser.parse_args().db.resolve()
+    if not db_path.exists():
+        sys.exit(f"{db_path} not found. Run: python db/seed.py")
 
     columns = read_schema()
     check_drafts(columns)
     check_glossary(columns)
+    check_tables_and_joins(columns)
     rows = column_rows(columns)
 
-    conn = sqlite3.connect(DB_PATH)
+    conn = sqlite3.connect(db_path)
     conn.execute("PRAGMA foreign_keys = ON")
     conn.executescript(META_DDL)
     with conn:
@@ -735,11 +818,15 @@ def main():
             f"VALUES ({', '.join('?' for _ in METRIC_FIELDS)})",
             [[m[f] for f in METRIC_FIELDS] for m in METRICS])
         conn.executemany(
+            "INSERT INTO meta_tables VALUES (?, ?, ?)",
+            [(t, d, g) for t, (d, g) in TABLE_DRAFTS.items()])
+        conn.executemany("INSERT INTO meta_joins VALUES (?, ?, ?, ?, ?, ?)", JOINS)
+        conn.executemany(
             f"INSERT INTO meta_glossary ({', '.join(GLOSSARY_FIELDS)}) "
             f"VALUES ({', '.join('?' for _ in GLOSSARY_FIELDS)})",
             [[g[f] for f in GLOSSARY_FIELDS] for g in GLOSSARY])
 
-    print(f"Built semantic catalog in {DB_PATH.name}")
+    print(f"Built semantic catalog in {db_path.name}")
     for table in ["meta_tables", "meta_columns", "meta_glossary", "meta_metrics", "meta_joins"]:
         count = conn.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]
         print(f"  {table:<14} {count:>3}")

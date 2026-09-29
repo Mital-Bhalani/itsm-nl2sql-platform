@@ -1,0 +1,256 @@
+# Golden eval set for the ITSM NL2SQL agent.
+#
+# Every expected value below was produced by running its reference_sql against
+# db/tickets_large.sqlite built by `python db/seed.py --incidents 50000 --changes 10000 --out db/tickets_large.sqlite` (seed 42, as-of 2026-09-28). Rebuild the
+# database before evaluating; if seed.py changes, regenerate the expected rows.
+#
+# Scoring (execution accuracy, used by evals/run_evals.py and /run-evals):
+#   - pass when the agent's SQL returns the same rows as expected.rows
+#   - rows compare order-insensitively unless order_matters is true
+#   - numbers may differ by at most `tolerance` (default 0)
+#   - ambiguous questions also pass on any `alternatives` reading
+#   - refusal questions pass when the agent declines and explains why; no SQL is expected
+
+version: 1
+as_of: "2026-09-28"
+database: db/tickets_large.sqlite
+
+questions:
+
+  - id: E01
+    category: easy_lookup
+    question: "How many incidents are there in total?"
+    reference_sql: |
+      SELECT COUNT(*) AS incidents
+      FROM incidents
+    expected:
+      columns: ["incidents"]
+      rows: [[50000]]
+    order_matters: false
+    ambiguous: false
+
+  - id: E02
+    category: easy_lookup
+    question: "How many P1 incidents are currently open?"
+    reference_sql: |
+      SELECT COUNT(*) AS open_p1
+      FROM incidents i
+      WHERE i.priority = 1 AND i.status IN ('New', 'In Progress', 'On Hold')
+    expected:
+      columns: ["open_p1"]
+      rows: [[252]]
+    order_matters: false
+    ambiguous: false
+    notes: "P1 = priority 1 (Critical). Open = New, In Progress or On Hold, not resolved_at IS NULL (that would also count Cancelled)."
+
+  - id: E03
+    category: easy_lookup
+    question: "What is the SLA target for priority 2 incidents?"
+    reference_sql: |
+      SELECT target_minutes
+      FROM sla_targets
+      WHERE priority = 2
+    expected:
+      columns: ["target_minutes"]
+      rows: [[480]]
+    order_matters: false
+    ambiguous: false
+    notes: "480 minutes = 8 hours. An answer in hours must say 8."
+
+  - id: E04
+    category: easy_lookup
+    question: "How many high-risk changes are there?"
+    reference_sql: |
+      SELECT COUNT(*) AS high_risk_changes
+      FROM changes c
+      WHERE c.risk = 'High'
+    expected:
+      columns: ["high_risk_changes"]
+      rows: [[1511]]
+    order_matters: false
+    ambiguous: false
+
+  - id: D01
+    category: date_range
+    question: "How many incidents were opened last month?"
+    reference_sql: |
+      SELECT COUNT(*) AS incidents
+      FROM incidents i
+      WHERE i.opened_at >= '2026-08-01' AND i.opened_at < '2026-09-01'
+    expected:
+      columns: ["incidents"]
+      rows: [[7464]]
+    order_matters: false
+    ambiguous: false
+    notes: "As-of date is 2026-09-28, so last month = August 2026 (calendar month), filtered on opened_at. Using the real clock is a failure."
+
+  - id: D02
+    category: date_range
+    question: "How many high-risk changes are scheduled next week?"
+    reference_sql: |
+      SELECT COUNT(*) AS high_risk_changes
+      FROM changes c
+      WHERE c.risk = 'High' AND c.status <> 'Cancelled' AND c.planned_start >= '2026-10-05' AND c.planned_start < '2026-10-12'
+    expected:
+      columns: ["high_risk_changes"]
+      rows: [[34]]
+    order_matters: false
+    ambiguous: true
+    alternatives:
+      - reading: "next 7 days / the as-of week (2026-09-28 to 2026-10-04)"
+        reference_sql: |
+          SELECT COUNT(*) AS high_risk_changes
+          FROM changes c
+          WHERE c.risk = 'High' AND c.status <> 'Cancelled' AND c.planned_start >= '2026-09-28' AND c.planned_start < '2026-10-05'
+        rows: [[37]]
+    notes: "2026-09-28 is a Monday. Default reading (glossary 'next week'): the following calendar week 2026-10-05 to 2026-10-11. The alternative reading is also accepted if the answer states its assumption."
+
+  - id: D03
+    category: date_range
+    question: "How many incidents were opened in the past month?"
+    reference_sql: |
+      SELECT COUNT(*) AS incidents
+      FROM incidents i
+      WHERE i.opened_at >= date('2026-09-28', '-30 days') AND i.opened_at < '2026-09-28'
+    expected:
+      columns: ["incidents"]
+      rows: [[12062]]
+    order_matters: false
+    ambiguous: true
+    alternatives:
+      - reading: "previous calendar month (August 2026)"
+        reference_sql: |
+          SELECT COUNT(*) AS incidents
+          FROM incidents i
+          WHERE i.opened_at >= '2026-08-01' AND i.opened_at < '2026-09-01'
+        rows: [[7464]]
+    notes: "'Past month' maps to 'last 30 days' in the glossary (2026-08-29 to 2026-09-27). Tests that it is not silently treated as 'last month'."
+
+  - id: D04
+    category: date_range
+    question: "How many incidents were resolved last week?"
+    reference_sql: |
+      SELECT COUNT(*) AS incidents
+      FROM incidents i
+      WHERE i.status IN ('Resolved', 'Closed') AND i.resolved_at >= '2026-09-21' AND i.resolved_at < '2026-09-28'
+    expected:
+      columns: ["incidents"]
+      rows: [[2051]]
+    order_matters: false
+    ambiguous: false
+    notes: "Last week = Monday 2026-09-21 to Sunday 2026-09-27. 'Resolved' means the filter must be on resolved_at, not opened_at (the metric default time_column)."
+
+  - id: J01
+    category: multi_table_join
+    question: "Which assignment groups breached SLA most last month?"
+    reference_sql: |
+      SELECT g.name AS team, SUM(CASE WHEN (julianday(i.resolved_at) - julianday(i.opened_at)) * 1440 > s.target_minutes THEN 1 ELSE 0 END) AS breached
+      FROM incidents i
+      JOIN sla_targets s ON s.priority = i.priority
+      JOIN assignment_groups g ON g.id = i.assignment_group_id
+      WHERE i.status IN ('Resolved', 'Closed') AND i.opened_at >= '2026-08-01' AND i.opened_at < '2026-09-01'
+      GROUP BY g.name
+      ORDER BY breached DESC, g.name
+    expected:
+      columns: ["team", "breached"]
+      rows: [["Network", 279], ["Database", 261], ["Service Desk", 216], ["Application Support", 198], ["Infrastructure", 124]]
+    order_matters: true
+    ambiguous: false
+    notes: "Ranked by breach count (the question says 'most'). Ranking by rate gives a different order (Database 28.6% first) and is a failure here."
+
+  - id: J02
+    category: multi_table_join
+    question: "What is the SLA breach rate for each priority?"
+    reference_sql: |
+      SELECT i.priority, ROUND(100.0 * AVG(CASE WHEN (julianday(i.resolved_at) - julianday(i.opened_at)) * 1440 > s.target_minutes THEN 1.0 ELSE 0.0 END), 1) AS breach_pct
+      FROM incidents i
+      JOIN sla_targets s ON s.priority = i.priority
+      WHERE i.status IN ('Resolved', 'Closed')
+      GROUP BY i.priority
+      ORDER BY i.priority
+    expected:
+      columns: ["priority", "breach_pct"]
+      rows: [[1, 15.6], [2, 15.2], [3, 15.1], [4, 14.7]]
+    order_matters: false
+    tolerance: 0.1
+    ambiguous: false
+    notes: "Percent of resolved or closed incidents, all time. Uses metric sla_breach_rate."
+
+  - id: J03
+    category: multi_table_join
+    question: "How many open incidents does each team have?"
+    reference_sql: |
+      SELECT g.name AS team, COUNT(i.id) AS open_incidents
+      FROM assignment_groups g
+      LEFT
+      JOIN incidents i ON i.assignment_group_id = g.id AND i.status IN ('New', 'In Progress', 'On Hold')
+      GROUP BY g.name
+      ORDER BY g.name
+    expected:
+      columns: ["team", "open_incidents"]
+      rows: [["Application Support", 951], ["Database", 700], ["Infrastructure", 726], ["Network", 787], ["Service Desk", 1836]]
+    order_matters: false
+    ambiguous: false
+
+  - id: J04
+    category: multi_table_join
+    question: "Which team has the most agents?"
+    reference_sql: |
+      SELECT g.name AS team, COUNT(*) AS agents
+      FROM users u
+      JOIN assignment_groups g ON g.id = u.assignment_group_id
+      WHERE u.role = 'agent'
+      GROUP BY g.name
+      ORDER BY agents DESC
+      LIMIT 1
+    expected:
+      columns: ["team", "agents"]
+      rows: [["Service Desk", 11]]
+    order_matters: false
+    ambiguous: false
+    notes: "Agents only (role = 'agent'); team leads are not agents. Counting all users gives 12, which is a failure. Must not reveal user names."
+
+  - id: K01
+    category: edge_case
+    question: "Which teams had zero SLA breaches last month?"
+    reference_sql: |
+      SELECT g.name AS team
+      FROM assignment_groups g
+      LEFT
+      JOIN incidents i ON i.assignment_group_id = g.id AND i.status IN ('Resolved', 'Closed') AND i.opened_at >= '2026-08-01' AND i.opened_at < '2026-09-01'
+      LEFT
+      JOIN sla_targets s ON s.priority = i.priority
+      GROUP BY g.name
+      HAVING SUM(CASE WHEN (julianday(i.resolved_at) - julianday(i.opened_at)) * 1440 > s.target_minutes THEN 1 ELSE 0 END) = 0 OR COUNT(i.id) = 0
+      ORDER BY g.name
+    expected:
+      columns: ["team"]
+      rows: []
+    order_matters: false
+    ambiguous: false
+    notes: "Group with a zero count. An inner join plus GROUP BY drops zero groups; the answer must still list Infrastructure."
+
+  - id: K02
+    category: edge_case
+    question: "How many cancelled incidents does the Network team have?"
+    reference_sql: |
+      SELECT COUNT(i.id) AS cancelled
+      FROM assignment_groups g
+      LEFT
+      JOIN incidents i ON i.assignment_group_id = g.id AND i.status = 'Cancelled'
+      WHERE g.name = 'Network'
+    expected:
+      columns: ["cancelled"]
+      rows: [[173]]
+    order_matters: false
+    ambiguous: false
+    notes: "Correct answer is 0, not an empty result or an error. The team exists but has no cancelled incidents."
+
+  - id: K03
+    category: edge_case
+    question: "Who is the assignee of incident 101?"
+    reference_sql: null
+    expected:
+      refusal: true
+    ambiguous: false
+    notes: "Not answerable: incidents link to a team, not a person (glossary 'assignee', is_answerable = 0). Pass = the answer says the data does not record assignees and may offer the team instead; it must not join users and name a person."

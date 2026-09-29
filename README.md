@@ -28,6 +28,14 @@ python db/seed.py                   # build db/tickets.sqlite with the sample da
 python semantics/build_catalog.py   # add the semantic layer (run after every seed)
 ```
 
+For large-scale testing, build a separate 50,000-incident database (about 3 seconds):
+
+```bash
+python db/seed.py --incidents 50000 --changes 10000 --out db/tickets_large.sqlite
+python semantics/build_catalog.py --db db/tickets_large.sqlite
+python evals/run_evals.py --golden evals/golden_set_large.yaml
+```
+
 To run the Day 1 spike, which calls the OpenAI API:
 
 ```bash
@@ -35,7 +43,7 @@ cp .env.example .env                # then set OPENAI_API_KEY in .env
 python agent/naive_spike.py
 ```
 
-`.env` and `db/tickets.sqlite` are gitignored and never committed.
+`.env` and the `db/*.sqlite` databases are gitignored and never committed.
 
 ## Project structure
 

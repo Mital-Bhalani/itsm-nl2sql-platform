@@ -22,21 +22,29 @@ is upgraded (to 1.55.3 or later).
 ```
 python db/seed.py                   # recreates db/tickets.sqlite from db/schema.sql + synthetic data
 python semantics/build_catalog.py   # adds the meta_* semantic catalog to db/tickets.sqlite
-python agent/naive_spike.py         # Day 1 naive spike (needs .env with OPENAI_API_KEY)
+python agent/nl2sql.py "question"   # NL2SQL agent: catalog context -> OpenAI -> guarded SQL -> rows
+python evals/run_evals.py           # score the agent on evals/golden_set.yaml (--json, --self-test, --golden)
+python agent/naive_spike.py         # Day 1 naive spike (no context; shows why the agent is needed)
 ```
+
+Slash commands: `/smoke` (rebuild + checks), `/build-catalog` (rebuild catalog, report
+undocumented entries), `/run-evals` (accuracy + 2 worst failures). Skill:
+`.claude/skills/diagnose-eval-failure/` (maps failed evals to the meta_* entry to fix).
 
 `seed.py` deletes and recreates the database file, which also wipes the meta_* tables, so
 always run `build_catalog.py` after it. `/smoke` (`.claude/commands/smoke.md`) rebuilds the
 database, prints row counts and reports pass/fail.
 
-**Runnable status (end-to-end check, 2026-09-28):** seed, catalog build, FK/integrity checks,
-determinism (two rebuilds identical) and catalog-driven SQL all **pass**. Dependencies are
-installed (`pip install -r requirements.txt`, `pip check` clean; installed to the user site for
-Python 3.12). `.env` with `OPENAI_API_KEY` now exists (gitignored; never print or commit it).
-`/smoke` still does not check the key. The spike's live call reaches OpenAI and the key is
-accepted, but it fails with **429 `insufficient_quota`** (`credit_balance_exhausted`): the
-OpenAI account has no credits. That is a billing issue, not a project defect; the spike has
-not yet produced output. Full check: 59 of 60 pass, the one failure being this billing block.
+**Runnable status (2026-09-29):** everything runs end to end. Dependencies installed
+(`pip install -r requirements.txt`, `pip check` clean, Python 3.12 user site). `.env` holds
+`OPENAI_API_KEY` (gitignored; never print or commit it) and the OpenAI account has credits.
+- `run_evals.py --self-test` (no API): **15/15**. Fed deliberately wrong SQL, scoring caught 12
+  of 14 traps; the 2 misses are golden-set limits (see Evals below), not scoring bugs.
+- **Live eval (gpt-4o-mini, temperature 0): 15/15 on three consecutive runs** (was 13/15
+  before the catalog fixes listed under Evals).
+- Naive spike first real output confirms the Day 1 failure modes: invented table
+  `sla_breaches`, Postgres `DATE_TRUNC`/`INTERVAL`, real clock `CURRENT_DATE`, breach assumed
+  to be stored.
 
 **Git:** branch `main`, first commit 2026-09-29 (history before that lives only in this file).
 Remote `origin` = **https://github.com/Mital-Bhalani/itsm-nl2sql-platform** (private). Claude
@@ -62,9 +70,9 @@ read-only · **SELECT-only** · auto-LIMIT · **no raw PII in output** (`users.n
 | folder | day | status |
 |---|---|---|
 | `db/` | 1 | **done**: `schema.sql`, `seed.py`, generated `tickets.sqlite` (gitignored `*.sqlite`) |
-| `agent/` | 1 → 2–3 | `naive_spike.py` written, **not yet run**; NL2SQL agent loop not started |
-| `semantics/` | 2 | **in progress**: `build_catalog.py` (meta_columns, meta_metrics, meta_glossary filled) |
-| `evals/` | 2 | not started; seed questions are at the bottom of `db/schema.sql` |
+| `agent/` | 1 → 2–3 | `naive_spike.py` (Day 1) and **`nl2sql.py` (agent) working**; no answer-in-words step yet |
+| `semantics/` | 2 | **done**: `build_catalog.py` fills all five meta_* tables |
+| `evals/` | 2 | **working**: `golden_set.yaml` (15 questions) + `run_evals.py` |
 | `api/` | 3 | not started (FastAPI `/ask`) |
 | `ui/` | 4 | not started (Streamlit) |
 
@@ -126,10 +134,30 @@ the next 28 days) · 649 rows total.
   Database 2, Application Support 1, Infrastructure 0 — but by rate Database is highest
   (28.6%). Count vs rate give different rankings; keep both as eval cases.
 - Reopen rate 44/500 = 8.8%; MTTR ≈ 2,828.8 min.
-- Changes risk mix Low 49 / Moderate 32 / High 19. Changes 91 and 92 are **pinned** to High
-  risk, Scheduled, 4-hour windows (`PINNED_HIGH_RISK_CHANGES` in `seed.py`): 2026-10-01 21:00
-  (as-of week) and 2026-10-07 21:00 (following calendar week), so "high-risk changes next week"
-  has 1 row under either reading. Pinning adds no random draws; all other rows are unchanged.
+- Changes risk mix Low 49 / Moderate 32 / High 19. The first two future changes (ids 91 and 92
+  at the default size) are **pinned** to High risk, Scheduled, 4-hour windows
+  (`PINNED_HIGH_RISK_STARTS` in `seed.py`): 2026-10-01 21:00 (as-of week) and 2026-10-07 21:00
+  (following calendar week), so "high-risk changes next week" has data under either reading.
+  Pinning adds no random draws; all other rows are unchanged.
+
+**Large dataset (2026-09-29).** `seed.py` takes `--incidents`, `--changes`, `--out`; counts
+scale with the same ratios (88% resolved/closed, 2% cancelled, rest open; 90% past changes;
+exact 15% breach); users stay 40. With no arguments the output is **identical** to before
+(verified by hash). Build the large set with:
+```
+python db/seed.py --incidents 50000 --changes 10000 --out db/tickets_large.sqlite   # ~3 s, 11 MB
+python semantics/build_catalog.py --db db/tickets_large.sqlite                     # ~0.5 s
+python evals/make_golden_set.py --db db/tickets_large.sqlite --out evals/golden_set_large.yaml
+python evals/run_evals.py --golden evals/golden_set_large.yaml   # DB read from the YAML
+python agent/nl2sql.py --db db/tickets_large.sqlite "question"
+```
+Verified: 50,000 incidents / 10,000 changes, breach 6,600/44,000 = 15.0%, open 5,000 (10%),
+deterministic, FK/integrity clean; self-test 15/15; **live 15/15**; slowest reference query
+257 ms (J03); `LIMIT 1000` capped a 42,364-row query. At this scale K01 (teams with zero
+breaches → no rows) and K02 (Network cancelled → 173) lose their "zero" edge; they are still
+valid tests. `db/tickets_large.sqlite` is gitignored; `golden_set_large.yaml` is committed.
+`evals/make_golden_set.py` generates both golden sets (defaults reproduce `golden_set.yaml`
+byte-identically).
 
 ## Semantic catalog (`semantics/build_catalog.py` → meta_* tables in `tickets.sqlite`)
 
@@ -138,8 +166,8 @@ the next 28 days) · 649 rows total.
 | `meta_columns` | 23 | type, nullability, keys, FK, allowed values (read from schema.sql) + drafted description, example, `is_pii`, `is_ambiguous`/note, `synonyms` |
 | `meta_metrics` | 3 | `mttr` (minutes), `sla_breach_rate`, `reopen_rate` (ratio 0–1) as reusable SQL fragments |
 | `meta_glossary` | 42 | business terms → entity / value / metric / time / concept, with `sql_hint` |
-| `meta_tables` | 0 | not populated yet |
-| `meta_joins` | 0 | not populated yet |
+| `meta_tables` | 5 | description and grain per data table (`TABLE_DRAFTS`) |
+| `meta_joins` | 4 | one row per schema foreign key, with cardinality and pitfalls (`JOINS`); build fails if they drift |
 
 - Metric composition: `SELECT <sql_expression> FROM <base_table> <base_alias>
   <required_joins> WHERE <filters> [AND question filters on <time_column>]`. All use alias `i`,
@@ -162,21 +190,59 @@ the next 28 days) · 649 rows total.
 - Not answerable from this data (`is_answerable = 0`): assignee, caller, response time,
   downtime, impact, actual change window, change-caused incident.
 
+## Agent (`agent/nl2sql.py`)
+
+`translate(question)` → `{terms, refusal, sql, assumption, unsafe}`; `run_sql(conn, sql)`.
+1. Resolve question phrases (1–4 words, longest first) with `find_term()`.
+2. A term with `is_answerable = 0` → refuse **before** any API call.
+3. Prompt = rules + all meta_* content (tables, columns, joins, metrics, glossary) + the terms
+   found; nothing about the schema is hard-coded. Model `OPENAI_MODEL` (default
+   `gpt-4o-mini`), temperature 0; ambiguous terms → `-- assumption:` line.
+4. Guardrails: one SELECT/WITH statement, write/admin keywords rejected, DB opened read-only,
+   `LIMIT 1000` appended if missing, `users.name` blocked by a SQLite authorizer (also via
+   `SELECT *`). API failures raise `AgentAPIError`.
+
+## Evals (`evals/golden_set.yaml`, `evals/run_evals.py`)
+
+15 questions (4 easy lookups, 4 date ranges, 4 multi-table joins, 3 edge cases incl. a
+refusal). Expected rows were generated by running each `reference_sql`; regenerate them if
+`seed.py` changes. Scoring: order-insensitive unless `order_matters`; numeric `tolerance`;
+extra result columns allowed if a subset matches; `alternatives` accepted for ambiguous
+questions; refusal questions pass only on refusal. Statuses `pass|wrong_result|sql_error|
+unsafe|no_sql`; `--json` prints the object `/run-evals` reads. API failure stops the run
+(exit 2) instead of counting as wrong answers.
+
+Known golden-set limits: D01's "real clock" trap is only caught from 2026-10-01 (today's real
+month equals the as-of month); E02's "`resolved_at IS NULL` = open" trap is not caught (no
+cancelled P1 rows); D02's two readings both return 1.
+
+**Live accuracy history (gpt-4o-mini, temperature 0):** 13/15 → **15/15 on three consecutive
+runs (2026-09-29)** after these catalog fixes (no agent code changed):
+- `meta_metrics[sla_breach_rate].notes`: rate/percentage questions → `ROUND(100.0 * expr, 1)`;
+  "how many / most breaches" → the count, never ×100. (Fixed J02; the first wording, "always a
+  percentage", broke J01 by scaling counts.)
+- `meta_joins[incidents.assignment_group_id → assignment_groups.id].notes`: join teams only
+  for per-team answers; conditions on incidents and the `sla_targets` join go inside the LEFT
+  JOIN; count with `COUNT(i.id)`, never `COUNT(*)`. (Fixed K01; the unscoped first wording broke
+  D04; the COUNT rule fixed an intermittent K02 failure: `COUNT(*)` returned 1 instead of 0.)
+- `meta_glossary['SLA breach'].definition`: time windows filter `i.opened_at`.
+- `meta_glossary['resolved incident'].definition`: "resolved <window>" filters `i.resolved_at`.
+
+Lessons: catalog wording generalises — fix narrowly, re-run the **whole** set, and repeat runs
+(the model is not fully deterministic even at temperature 0). 15/15 on 15 questions written
+alongside these fixes is not proof of general accuracy; grow the golden set (open item 3).
+
 ## Open items / next steps
 
-1. Populate `meta_tables` and `meta_joins`.
+1. Apply the percentage convention to `reopen_rate` too (only `sla_breach_rate` was changed).
 2. Resolve the flagged ambiguities with the business (especially Resolved vs Closed).
-3. Build the eval set in `evals/` from the example questions (include count-vs-rate cases).
-4. Build the NL2SQL agent loop in `agent/` using the catalog, with the safety posture above.
-5. **Blocked on billing:** the OpenAI account has no credits. Add credits at
-   platform.openai.com → Settings → Billing, then run `python agent/naive_spike.py` and record
-   its output as the Day 1 failure example. (Rotate the key after the training: it was pasted
-   into a chat session.)
+3. Add plural questions ("how many tickets…", "which teams…"), a Cancelled-P1 case for E02,
+   and different-answer readings of "next week" to the golden set.
+4. Agent: turn rows into a plain-English answer (with the SQL shown); then Day 3 API, Day 4 UI.
+5. **Rotate the OpenAI key**: it was pasted into a chat session.
 6. Optional: priority synonyms "urgent", "highest/lowest priority", "moderate/normal priority"
    were dropped when the vocabulary was standardised; re-add to `PRIORITY_LEVELS` if wanted.
 7. Decide whether the spike should take the question as a CLI argument.
-8. Add plural questions ("how many tickets…", "which teams…") and both readings of "next
-   week" to the eval set.
 
 Closed gaps (2026-09-28): no High-risk change next week → pinned changes 91/92 in `seed.py`;
 plural words missed by glossary lookup → `find_term()` / `singular()` in `build_catalog.py`.
