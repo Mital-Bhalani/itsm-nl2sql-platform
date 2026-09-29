@@ -1,0 +1,7 @@
+# Pinned for a reproducible, beginner-safe setup.
+# NOTE: sqlite3 ships with the Python standard library, so it is NOT listed here.
+# db/seed.py and semantics/build_catalog.py use the standard library only.
+# Runtime dependencies for the NL2SQL app:
+openai==1.51.2          # runtime: the app calls the OpenAI API to generate SQL
+python-dotenv==1.0.1    # loads OPENAI_API_KEY from .env (agent/naive_spike.py reads .env itself)
+httpx==0.27.2           # openai 1.51.2 breaks on httpx>=0.28 ("unexpected keyword argument 'proxies'")

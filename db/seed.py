@@ -1,0 +1,398 @@
+"""
+Build db/tickets.sqlite from db/schema.sql and fill it with synthetic ITSM data.
+
+    python db/seed.py
+
+The output is deterministic: one seeded random generator and a fixed anchor date
+(NOW), so every run produces exactly the same rows.
+
+What gets generated:
+    5 assignment groups, 40 users, 4 SLA targets,
+    500 incidents over the 180 days before NOW,
+    100 changes (about 90 in the past 180 days, about 10 scheduled in the next 28 days).
+
+Exactly 15% of resolved/closed incidents breach their SLA target, measured as
+wall-clock minutes from opened_at to resolved_at (see the schema.sql header).
+Breaches are weighted toward Network and Database so groups differ.
+"""
+
+import random
+import sqlite3
+from datetime import datetime, timedelta
+from pathlib import Path
+
+DB_DIR = Path(__file__).resolve().parent
+SCHEMA_PATH = DB_DIR / "schema.sql"
+DB_PATH = DB_DIR / "tickets.sqlite"
+
+SEED = 42
+NOW = datetime(2026, 9, 28, 0, 0, 0)  # fixed anchor, UTC
+WINDOW_START = NOW - timedelta(days=180)
+TS_FORMAT = "%Y-%m-%d %H:%M:%S"
+
+N_INCIDENTS = 500
+N_RESOLVED = 440  # Resolved or Closed
+N_CANCELLED = 10
+N_OPEN = N_INCIDENTS - N_RESOLVED - N_CANCELLED  # New / In Progress / On Hold
+BREACH_RATE = 0.15
+
+N_PAST_CHANGES = 90
+N_FUTURE_CHANGES = 10
+
+# Future changes pinned to High risk so "high-risk changes next week" (eval question 5) has
+# data under both readings of "next week": the as-of week and the following calendar week.
+# Applied after generation, with no extra random draws, so every other row is unchanged.
+# change id -> planned_start (4-hour window, status Scheduled)
+PINNED_HIGH_RISK_CHANGES = {
+    91: datetime(2026, 10, 1, 21, 0, 0),  # Thursday of the as-of week
+    92: datetime(2026, 10, 7, 21, 0, 0),  # Wednesday of the following calendar week
+}
+
+rng = random.Random(SEED)
+
+# -----------------------------------------------------------------------------
+#  Reference data
+# -----------------------------------------------------------------------------
+# priority -> target minutes (P1 4h, P2 8h, P3 2d, P4 5d)
+SLA_TARGETS = {1: 240, 2: 480, 3: 2880, 4: 7200}
+PRIORITY_WEIGHTS = {1: 5, 2: 15, 3: 50, 4: 30}
+
+# id -> name
+GROUPS = {
+    1: "Service Desk",
+    2: "Network",
+    3: "Database",
+    4: "Application Support",
+    5: "Infrastructure",
+}
+INCIDENT_GROUP_WEIGHTS = {1: 35, 2: 16, 3: 14, 4: 20, 5: 15}
+CHANGE_GROUP_WEIGHTS = {1: 5, 2: 25, 3: 20, 4: 20, 5: 30}
+# Relative likelihood that a resolved incident in this group is picked to breach.
+BREACH_GROUP_WEIGHTS = {1: 0.6, 2: 2.0, 3: 1.8, 4: 1.0, 5: 1.0}
+
+# Agents per group (31 in total); every group also gets one team lead.
+AGENTS_PER_GROUP = {1: 11, 2: 5, 3: 5, 4: 5, 5: 5}
+N_MANAGERS = 3
+N_ADMINS = 1
+
+FIRST_NAMES = [
+    "Aisha", "Ben", "Carla", "Dev", "Elena", "Farid", "Grace", "Hiro",
+    "Isla", "Jonas", "Kavya", "Liam", "Maya", "Noah", "Olu", "Priya",
+    "Quinn", "Ravi", "Sofia", "Tom",
+]
+LAST_NAMES = [
+    "Adams", "Bose", "Chen", "Dubois", "Evans", "Fischer", "Garcia", "Hughes",
+    "Iyer", "Jensen", "Kowalski", "Lopez", "Mehta", "Nakamura", "Okafor",
+    "Patel", "Rossi", "Silva", "Turner", "Weber",
+]
+
+INCIDENT_DESCRIPTIONS = {
+    1: [
+        "User locked out of account after password expiry",
+        "Laptop will not boot past manufacturer logo",
+        "Outlook not syncing new mail",
+        "Unable to connect to office printer",
+        "MFA prompt not received on mobile",
+        "New starter missing access to shared drive",
+        "Teams calls dropping after a few minutes",
+        "Monitor flickering on docking station",
+    ],
+    2: [
+        "VPN tunnel dropping for remote users",
+        "Wi-Fi unavailable on floor 3",
+        "High packet loss between data centres",
+        "Branch office site-to-site link down",
+        "DNS resolution failing for internal domains",
+        "Firewall blocking payroll application traffic",
+        "Load balancer health checks failing",
+        "Slow network performance in London office",
+    ],
+    3: [
+        "Nightly backup job failed on finance database",
+        "Replication lag on reporting replica",
+        "Deadlocks in order management database",
+        "Database storage above 90 percent",
+        "Slow queries on customer search",
+        "Failed login attempts locking service account",
+        "Index rebuild job overran maintenance window",
+        "Connection pool exhausted on CRM database",
+    ],
+    4: [
+        "Checkout page returning HTTP 500 errors",
+        "CRM export to CSV timing out",
+        "HR portal showing wrong leave balance",
+        "Mobile app crashing on login",
+        "Invoice PDF generation failing",
+        "Single sign-on redirect loop in intranet",
+        "Search results missing recent documents",
+        "Scheduled report emails not sent",
+    ],
+    5: [
+        "Disk full on application server",
+        "VM unresponsive after host patching",
+        "Certificate expired on internal web server",
+        "Backup agent offline on file server",
+        "High CPU on virtualisation cluster",
+        "Cloud storage bucket access denied",
+        "Kubernetes pod restarting in a loop",
+        "Server room temperature alert",
+    ],
+}
+
+CHANGE_DESCRIPTIONS = {
+    1: [
+        "Roll out new laptop image to service desk build process",
+        "Update self-service password reset portal",
+        "Migrate shared mailboxes to new licence tier",
+    ],
+    2: [
+        "Upgrade core switch firmware",
+        "Replace edge firewall rule base",
+        "Add new VLAN for meeting room devices",
+        "Migrate VPN concentrator to new appliance",
+        "Increase WAN bandwidth for branch offices",
+    ],
+    3: [
+        "Apply quarterly database engine patch",
+        "Add index to orders table",
+        "Migrate reporting database to new storage",
+        "Rotate database service account credentials",
+        "Enable point-in-time recovery on finance database",
+    ],
+    4: [
+        "Deploy CRM release 4.2",
+        "Upgrade HR portal framework version",
+        "Enable new checkout payment provider",
+        "Deploy mobile app API hotfix",
+        "Change single sign-on identity provider settings",
+    ],
+    5: [
+        "Monthly OS patching for Windows servers",
+        "Expand storage on virtualisation cluster",
+        "Renew and replace internal TLS certificates",
+        "Upgrade Kubernetes cluster version",
+        "Decommission legacy file server",
+    ],
+}
+
+RISK_WEIGHTS = {"Low": 50, "Moderate": 35, "High": 15}
+# (min, max) planned duration in minutes per risk level
+CHANGE_DURATION = {"Low": (30, 120), "Moderate": (60, 240), "High": (120, 480)}
+
+
+# -----------------------------------------------------------------------------
+#  Helpers
+# -----------------------------------------------------------------------------
+def weighted(weights):
+    """Pick one key from a {key: weight} dict."""
+    return rng.choices(list(weights), weights=list(weights.values()))[0]
+
+
+def ts(moment):
+    return moment.strftime(TS_FORMAT)
+
+
+def random_moment(start, end, business_prob):
+    """
+    A random moment in [start, end). With probability business_prob it is moved
+    to a weekday between 08:00 and 18:00 (on the same day or the Friday before).
+    """
+    span = (end - start).total_seconds()
+    moment = start + timedelta(seconds=int(rng.uniform(0, span)))
+    if rng.random() < business_prob:
+        while moment.weekday() >= 5:  # Saturday / Sunday
+            moment -= timedelta(days=1)
+        moment = moment.replace(
+            hour=rng.randint(8, 17), minute=rng.randint(0, 59), second=rng.randint(0, 59)
+        )
+    return min(max(moment, start), end - timedelta(seconds=1))
+
+
+def maintenance_moment(start, end):
+    """
+    A random start time in [start, end), biased toward maintenance windows:
+    70% weekday evenings (20:00-23:00) or weekends, 30% business hours.
+    """
+    span = (end - start).total_seconds()
+    moment = start + timedelta(seconds=int(rng.uniform(0, span)))
+    if rng.random() < 0.7:
+        hour = rng.randint(20, 23) if moment.weekday() < 5 else rng.randint(6, 22)
+    else:
+        hour = rng.randint(9, 16)
+    moment = moment.replace(hour=hour, minute=rng.choice([0, 15, 30, 45]), second=0)
+    return min(max(moment, start), end - timedelta(minutes=1))
+
+
+def weighted_sample(items, weight_of, k):
+    """Pick k distinct items, each with probability proportional to weight_of(item)."""
+    keyed = [(rng.random() ** (1.0 / weight_of(item)), item) for item in items]
+    keyed.sort(key=lambda pair: pair[0], reverse=True)
+    return [item for _, item in keyed[:k]]
+
+
+# -----------------------------------------------------------------------------
+#  Row generators
+# -----------------------------------------------------------------------------
+def make_users():
+    names = rng.sample([f"{f} {l}" for f in FIRST_NAMES for l in LAST_NAMES], 40)
+    slots = []
+    for group_id in GROUPS:
+        slots.append(("team_lead", group_id))
+        slots.extend(("agent", group_id) for _ in range(AGENTS_PER_GROUP[group_id]))
+    slots.extend(("manager", None) for _ in range(N_MANAGERS))
+    slots.extend(("admin", None) for _ in range(N_ADMINS))
+    return [
+        (user_id, name, role, group_id)
+        for user_id, (name, (role, group_id)) in enumerate(zip(names, slots), start=1)
+    ]
+
+
+def make_incidents():
+    # Fix the status bucket of every incident first so the counts are exact.
+    buckets = ["resolved"] * N_RESOLVED + ["cancelled"] * N_CANCELLED + ["open"] * N_OPEN
+    rng.shuffle(buckets)
+
+    drafts = []
+    for incident_id, bucket in enumerate(buckets, start=1):
+        group_id = weighted(INCIDENT_GROUP_WEIGHTS)
+        drafts.append({
+            "id": incident_id,
+            "bucket": bucket,
+            "priority": weighted(PRIORITY_WEIGHTS),
+            "group_id": group_id,
+            "short_desc": rng.choice(INCIDENT_DESCRIPTIONS[group_id]),
+        })
+
+    resolved = [d for d in drafts if d["bucket"] == "resolved"]
+    n_breach = round(BREACH_RATE * len(resolved))
+    breach_ids = {
+        d["id"]
+        for d in weighted_sample(resolved, lambda d: BREACH_GROUP_WEIGHTS[d["group_id"]], n_breach)
+    }
+
+    rows = []
+    for d in drafts:
+        target = SLA_TARGETS[d["priority"]]
+        breached = d["id"] in breach_ids
+        resolved_at = None
+
+        if d["bucket"] == "open":
+            opened_at = random_moment(NOW - timedelta(days=14), NOW, 0.75)
+            status = rng.choices(["New", "In Progress", "On Hold"], weights=[25, 55, 20])[0]
+        elif d["bucket"] == "cancelled":
+            opened_at = random_moment(WINDOW_START, NOW, 0.75)
+            status = "Cancelled"
+        else:
+            fraction = rng.uniform(1.05, 3.0) if breached else rng.uniform(0.10, 0.95)
+            duration = timedelta(minutes=target * fraction)
+            opened_at = random_moment(WINDOW_START, NOW, 0.75)
+            if opened_at + duration > NOW:  # resolution must not be in the future
+                opened_at = NOW - duration - timedelta(minutes=rng.randint(10, 600))
+            resolved_at = opened_at + duration
+            status = "Closed" if resolved_at < NOW - timedelta(days=5) else "Resolved"
+
+        if d["bucket"] == "resolved":
+            reopen_weights = [75, 18, 7] if breached else [91, 7, 2]
+            reopened_count = rng.choices([0, 1, 2], weights=reopen_weights)[0]
+        else:
+            reopened_count = 0
+
+        rows.append((
+            d["id"],
+            d["short_desc"],
+            d["priority"],
+            status,
+            d["group_id"],
+            ts(opened_at),
+            ts(resolved_at) if resolved_at else None,
+            reopened_count,
+        ))
+    return rows
+
+
+def make_changes():
+    rows = []
+    for change_id in range(1, N_PAST_CHANGES + N_FUTURE_CHANGES + 1):
+        is_future = change_id > N_PAST_CHANGES
+        group_id = weighted(CHANGE_GROUP_WEIGHTS)
+        risk = weighted(RISK_WEIGHTS)
+        low, high = CHANGE_DURATION[risk]
+        duration = timedelta(minutes=rng.randint(low // 15, high // 15) * 15)
+
+        if is_future:
+            start = maintenance_moment(NOW, NOW + timedelta(days=28))
+            if start < NOW + timedelta(days=7):
+                status = "Scheduled"
+            else:
+                status = rng.choices(["Draft", "Assess", "Scheduled"], weights=[30, 40, 30])[0]
+        else:
+            start = maintenance_moment(WINDOW_START, NOW)
+            end = start + duration
+            if end > NOW:
+                status = "Implement"
+            elif end > NOW - timedelta(days=3):
+                status = "Review"
+            else:
+                status = rng.choices(["Closed", "Cancelled"], weights=[90, 10])[0]
+
+        rows.append((
+            change_id,
+            rng.choice(CHANGE_DESCRIPTIONS[group_id]),
+            risk,
+            status,
+            group_id,
+            ts(start),
+            ts(start + duration),
+        ))
+
+    for change_id, start in PINNED_HIGH_RISK_CHANGES.items():
+        _, description, _, _, group_id, _, _ = rows[change_id - 1]
+        rows[change_id - 1] = (
+            change_id, description, "High", "Scheduled", group_id,
+            ts(start), ts(start + timedelta(hours=4)),
+        )
+    return rows
+
+
+# -----------------------------------------------------------------------------
+#  Build
+# -----------------------------------------------------------------------------
+def main():
+    if DB_PATH.exists():
+        DB_PATH.unlink()
+
+    conn = sqlite3.connect(DB_PATH)
+    conn.execute("PRAGMA foreign_keys = ON")
+    conn.executescript(SCHEMA_PATH.read_text(encoding="utf-8"))
+
+    # Generate in a fixed order so the random draws are always the same.
+    users = make_users()
+    incidents = make_incidents()
+    changes = make_changes()
+
+    with conn:
+        conn.executemany("INSERT INTO assignment_groups VALUES (?, ?)", GROUPS.items())
+        conn.executemany("INSERT INTO sla_targets VALUES (?, ?)", SLA_TARGETS.items())
+        conn.executemany("INSERT INTO users VALUES (?, ?, ?, ?)", users)
+        conn.executemany("INSERT INTO incidents VALUES (?, ?, ?, ?, ?, ?, ?, ?)", incidents)
+        conn.executemany("INSERT INTO changes VALUES (?, ?, ?, ?, ?, ?, ?)", changes)
+
+    print(f"Built {DB_PATH.name}")
+    for table in ["assignment_groups", "users", "sla_targets", "incidents", "changes"]:
+        count = conn.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]
+        print(f"  {table:<18} {count:>4}")
+
+    breached, resolved = conn.execute("""
+        SELECT SUM((julianday(i.resolved_at) - julianday(i.opened_at)) * 1440 > s.target_minutes),
+               COUNT(*)
+        FROM incidents i
+        JOIN sla_targets s ON s.priority = i.priority
+        WHERE i.status IN ('Resolved', 'Closed')
+    """).fetchone()
+    print(f"  SLA breach rate    {breached}/{resolved} = {breached / resolved:.1%}")
+
+    conn.close()
+
+
+if __name__ == "__main__":
+    main()

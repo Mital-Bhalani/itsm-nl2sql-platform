@@ -1,0 +1,32 @@
+# =============================================================================
+#  What is NEVER committed (stays on the facilitator's disk only)
+# =============================================================================
+
+# --- Facilitator delivery scripts: PRIVATE, never commit ---
+# Your live "read this aloud" scripts with the real prompts. Students must not
+# see these. One per day (Day1_Facilitator_Script.md, Day2_..., etc.).
+Day*_Facilitator_Script.md
+*_Facilitator_Script.*
+facilitator/
+
+# --- Secrets: NEVER commit a real API key ---
+.env
+
+# --- Generated database artifact (rebuild with `python db/seed.py`) ---
+*.sqlite
+
+# --- Source brief / decks (kept out of the shared student repo) ---
+*_Delivery_and_Build_Plan.docx
+*.pptx
+
+# --- Python ---
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.pytest_cache/
+
+# --- OS / editor noise ---
+.DS_Store
+.idea/
+.vscode/
