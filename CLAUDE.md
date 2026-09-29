@@ -47,11 +47,14 @@ database, prints row counts and reports pass/fail.
   to be stored.
 
 **Git:** branch `main`, first commit 2026-09-29 (history before that lives only in this file).
-Remote `origin` = **https://github.com/Mital-Bhalani/itsm-nl2sql-platform** (private). Claude
+Remote `origin` = **https://github.com/Mital-Bhalani/itsm-nl2sql-platform** (**public**;
+recreated 2026-09-29 with a cleaned history so no employer name appears in any commit). Claude
 commits and pushes directly (`git push`) using the user's VS Code GitHub login via git's
-credential helper; the GitHub CLI (`gh`) is not installed. Commit author:
-`Mital-Bhalani <meetbhalani666@gmail.com>` (repo-local git config only).
-Never commit `.env` (API key) or `db/tickets.sqlite`; both are gitignored.
+credential helper; that login can create and push but not delete repos, and the GitHub CLI
+(`gh`) is not installed. Commit author: `Mital-Bhalani <meetbhalani666@gmail.com>`
+(repo-local git config only). Because the repo is public, scan staged changes for secrets and
+employer/client names before every push. Never commit `.env` (API key) or `db/*.sqlite`;
+both are gitignored.
 
 **Safety posture the platform will enforce (aspirational on Day 1, built Day 2+):**
 read-only · **SELECT-only** · auto-LIMIT · **no raw PII in output** (`users.name` is PII).
