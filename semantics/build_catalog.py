@@ -468,7 +468,9 @@ TABLE_DRAFTS = {
     "incidents": (
         "Unplanned interruptions: what broke, its priority, status, owning team, when it was "
         "opened and resolved, and how often it was reopened. SLA breach is derived by joining "
-        "sla_targets, not stored.",
+        "sla_targets, not stored. Totals and breakdowns by priority, status or date read this "
+        "table alone (FROM incidents i, no other join); join assignment_groups only when the "
+        "answer is per team or names a team.",
         "one row per incident"),
     "changes": (
         "Planned work on IT systems with risk level, status, owning team and a booked "

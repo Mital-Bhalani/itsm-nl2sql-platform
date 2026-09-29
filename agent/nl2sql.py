@@ -126,8 +126,11 @@ def build_context(conn, resolved):
         "- Use the aliases i = incidents, c = changes, g = assignment_groups, u = users, "
         "s = sla_targets.",
         "- Use metric SQL and glossary hints below exactly as given; do not invent formulas.",
-        "- When listing per team, start FROM assignment_groups g with LEFT JOIN so teams with "
-        "zero rows appear with 0.",
+        "- Only when the result has one row per team, start FROM assignment_groups g with LEFT "
+        "JOIN so teams with zero rows appear with 0; then every filter on the joined tables "
+        "(status, dates, priority) goes in the LEFT JOIN's ON clause, never in WHERE, and "
+        "'zero X' questions use HAVING on the aggregated measure. Otherwise start FROM the "
+        "table being counted and join nothing the question does not need.",
         "- 'Most'/'top' questions: ORDER BY the measure DESC. Return the columns the question "
         "asks for.",
         "- If a term is marked AMBIGUOUS, pick the default in its hint and put one comment line "
