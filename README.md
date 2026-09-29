@@ -36,6 +36,9 @@ python semantics/build_catalog.py --db db/tickets_large.sqlite
 python evals/run_evals.py --golden evals/golden_set_large.yaml
 ```
 
+In Claude Code, `/build-large` does all of this in one step (seed, catalog, golden set and a
+self-test); add `live` to also run the evals against the OpenAI API.
+
 To run the Day 1 spike, which calls the OpenAI API:
 
 ```bash

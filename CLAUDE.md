@@ -28,7 +28,9 @@ python agent/naive_spike.py         # Day 1 naive spike (no context; shows why t
 ```
 
 Slash commands: `/smoke` (rebuild + checks), `/build-catalog` (rebuild catalog, report
-undocumented entries), `/run-evals` (accuracy + 2 worst failures). Skill:
+undocumented entries), `/run-evals` (accuracy + 2 worst failures), `/build-large [N M] [live]`
+(seed + catalog + golden_set_large.yaml + self-test for the large DB in one go; default
+50000/10000, where golden_set_large.yaml must come out unchanged; `live` adds a live eval run). Skill:
 `.claude/skills/diagnose-eval-failure/` (maps failed evals to the meta_* entry to fix).
 
 `seed.py` deletes and recreates the database file, which also wipes the meta_* tables, so
@@ -231,7 +233,18 @@ runs (2026-09-29)** after these catalog fixes (no agent code changed):
 - `meta_glossary['SLA breach'].definition`: time windows filter `i.opened_at`.
 - `meta_glossary['resolved incident'].definition`: "resolved <window>" filters `i.resolved_at`.
 
-Lessons: catalog wording generalises — fix narrowly, re-run the **whole** set, and repeat runs
+- 2026-09-29, unneeded join: "incidents for each priority" joined `assignment_groups` for no
+  reason. A catalog-only fix (`meta_tables[incidents].description`: totals/breakdowns by
+  priority, status or date read incidents alone) changed nothing (3/3 still joined). Cause:
+  the hard-coded prompt rule in `agent/nl2sql.py` ("When listing per team, start FROM
+  assignment_groups…"). Reworded it to apply only when the result has one row per team; that
+  first rewording broke K01 5/5 (date filter moved to WHERE), so the rule now also says filters
+  on joined tables go in the LEFT JOIN's ON clause and "zero X" uses HAVING. Result: K01 5/5,
+  no unneeded joins, 15/15 twice on both golden sets.
+
+Lessons: the agent's prompt RULES outrank catalog notes — if a catalog fix has no effect, look
+for a conflicting rule in `build_context`. Catalog wording generalises — fix narrowly, re-run
+the **whole** set, and repeat runs
 (the model is not fully deterministic even at temperature 0). 15/15 on 15 questions written
 alongside these fixes is not proof of general accuracy; grow the golden set (open item 3).
 
