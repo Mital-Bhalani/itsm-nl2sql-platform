@@ -38,11 +38,11 @@ accepted, but it fails with **429 `insufficient_quota`** (`credit_balance_exhaus
 OpenAI account has no credits. That is a billing issue, not a project defect; the spike has
 not yet produced output. Full check: 59 of 60 pass, the one failure being this billing block.
 
-**Git:** local repository on branch `main`, first commit made 2026-09-29 (history before that
-lives only in this file). Target GitHub repo: **`itsm-nl2sql-platform`** (private), published
-and pushed through **GitHub Desktop** — the GitHub CLI (`gh`) is not installed, so Claude
-commits locally and the user clicks Publish / Push origin in Desktop. Commit author:
-`Mital-Bhalani <meetbhalani666@gmail.com>` (set in the repo's local git config only).
+**Git:** branch `main`, first commit 2026-09-29 (history before that lives only in this file).
+Remote `origin` = **https://github.com/Mital-Bhalani/itsm-nl2sql-platform** (private). Claude
+commits and pushes directly (`git push`) using the user's VS Code GitHub login via git's
+credential helper; the GitHub CLI (`gh`) is not installed. Commit author:
+`Mital-Bhalani <meetbhalani666@gmail.com>` (repo-local git config only).
 Never commit `.env` (API key) or `db/tickets.sqlite`; both are gitignored.
 
 **Safety posture the platform will enforce (aspirational on Day 1, built Day 2+):**
