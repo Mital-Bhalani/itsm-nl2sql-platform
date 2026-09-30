@@ -30,15 +30,6 @@ The **dictionary** is the key idea. On its own, an AI model guesses what "breach
 means and often gets it wrong. The dictionary tells it the company's exact definitions, so the
 same question always gets the same, correct answer.
 
-## What you can see
-
-| | |
-|---|---|
-| **Dashboard**: the health of the service at a glance: open tickets, SLA breaches, fix times, trends by team and month.<br/><br/>![Dashboard](docs/images/dashboard.png) | **Ask**: type a question, get a sentence, a chart and suggested next questions.<br/><br/>![Ask](docs/images/ask.png) |
-| **Explorer**: browse, filter and download every table in the database.<br/><br/>![Explorer](docs/images/explorer.png) | **Incident**: one ticket in detail: how much of its SLA it used, its timeline and similar past tickets.<br/><br/>![Incident](docs/images/incident.png) |
-| **Catalog**: the dictionary itself: every business term and what it means in the data.<br/><br/>![Catalog](docs/images/catalog.png) | **Data check**: proof that every number on screen matches the database (25 of 25 checks pass).<br/><br/>![Data check](docs/images/data-check.png) |
-| **Home**: start page with the service status and links to everything.<br/><br/>![Home](docs/images/home.png) | **Evals** (not pictured): scores the AI on 15 test questions with known answers. |
-
 ## How it fits together
 
 ```mermaid
@@ -239,16 +230,62 @@ pinned `openai` 1.51.2 breaks on newer versions.
 
 ## How this project was built
 
-The whole platform was built with **Claude Code**, an AI coding assistant, in eight steps (see
-[Status](#status)). The method was simple and repeated every day:
+### What the project does
 
-```mermaid
-flowchart LR
-    T["Try it"] --> F["Find what goes wrong"] --> X["Fix the cause"] --> M["Re-test everything"] --> T
-```
+IT support teams record every problem as a ticket. Managers constantly need answers from those
+tickets: *which team is missing its deadlines? how long do fixes take? what risky changes are
+coming up?* Normally that means asking an analyst to write a database query.
 
-Day 1 asked the AI a question with no help. It invented table names and guessed definitions.
-Each later day fixed one of those problems (the dictionary, the safety checks, the test
-questions) and then added the screens people use. Wrong answers were usually fixed by making
-the dictionary clearer, not by writing more code, and every fix was re-tested against all the
-test questions so it could not quietly break something else.
+This project removes that step. You type the question in plain English, and the app:
+
+1. looks up what your words mean in a built-in **dictionary** of the company's terms,
+2. asks an **AI model** to write the database query,
+3. **safety-checks** the query (read-only, no personal data) before running it,
+4. replies in a sentence, with a chart and the query it used, so the answer can be checked.
+
+It was built with **Claude Code**, an AI coding assistant, by repeatedly trying the app, finding
+what went wrong, fixing the cause and re-testing everything against a set of questions with
+known answers.
+
+### The pages
+
+**Home**: the starting point. Shows that the service is running, how much data is loaded, and
+links to every page.
+
+![Home page](docs/images/home.png)
+
+**Ask**: the heart of the app. Type a question and get a plain-English answer, a chart, the
+table of results and the query behind it. It also suggests follow-up questions, and you can
+rate each answer.
+
+![Ask page](docs/images/ask.png)
+
+**Dashboard**: the health of the service at a glance: total and open tickets, missed deadlines
+(SLA breaches), average fix time and reopen rate, with trends by month, team, priority and
+status. Click a team to see its tickets.
+
+![Dashboard page](docs/images/dashboard.png)
+
+**Explorer**: browse every table in the database like a spreadsheet: filter, search, sort and
+download. Staff names are hidden. Click a ticket to open it.
+
+![Explorer page](docs/images/explorer.png)
+
+**Incident**: one ticket in detail: how much of its deadline it used, a timeline of what happened
+when, and similar past tickets that may help solve it.
+
+![Incident page](docs/images/incident.png)
+
+**Catalog**: the dictionary the AI uses: every business term ("P1", "breach", "last month") and
+exactly what it means in the data. Terms that are unclear or not in the data are flagged.
+
+![Catalog page](docs/images/catalog.png)
+
+**Data check**: proof that the screens tell the truth. Every number the app shows is
+recalculated directly from the database and compared (25 of 25 match). You can also run your
+own read-only query here.
+
+![Data check page](docs/images/data-check.png)
+
+**Evals** (not pictured): scores the AI on a set of test questions whose correct answers are
+known, so any drop in accuracy is caught straight away.
