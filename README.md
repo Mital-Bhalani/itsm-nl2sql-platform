@@ -258,61 +258,66 @@ known answers.
 
 ### The pages
 
+Each page is shown in the light theme (left) and the dark theme (right). The switch in the
+top-right corner of every page flips the whole app; the choice is remembered, and the first visit
+follows your operating system setting. The layout also adapts to tablets and phones (the
+sidebar becomes a menu).
+
 **Home**: the starting point. Shows that the service is running, how much data is loaded, and
 links to every page.
 
-![Home page](docs/images/home.png)
+| Light | Dark |
+|---|---|
+| ![Home page](docs/images/home.png) | ![Home page in dark mode](docs/images/home-dark.png) |
 
 **Ask**: the heart of the app. Type a question and get a plain-English answer, a chart, the
 table of results and the query behind it. It also suggests follow-up questions, and you can
 rate each answer.
 
-![Ask page](docs/images/ask.png)
+| Light | Dark |
+|---|---|
+| ![Ask page](docs/images/ask.png) | ![Ask page in dark mode](docs/images/ask-dark.png) |
 
 **Dashboard**: the health of the service at a glance: total and open tickets, missed deadlines
 (SLA breaches), average fix time and reopen rate, with trends by month, team, priority and
 status. Click a team to see its tickets.
 
-![Dashboard page](docs/images/dashboard.png)
+| Light | Dark |
+|---|---|
+| ![Dashboard page](docs/images/dashboard.png) | ![Dashboard page in dark mode](docs/images/dashboard-dark.png) |
 
 **Explorer**: browse every table in the database like a spreadsheet: filter, search, sort and
 download. Staff names are hidden. Click a ticket to open it.
 
-![Explorer page](docs/images/explorer.png)
+| Light | Dark |
+|---|---|
+| ![Explorer page](docs/images/explorer.png) | ![Explorer page in dark mode](docs/images/explorer-dark.png) |
 
 **Incident**: one ticket in detail: how much of its deadline it used, a timeline of what happened
 when, and similar past tickets that may help solve it.
 
-![Incident page](docs/images/incident.png)
+| Light | Dark |
+|---|---|
+| ![Incident page](docs/images/incident.png) | ![Incident page in dark mode](docs/images/incident-dark.png) |
 
 **Catalog**: the dictionary the AI uses: every business term ("P1", "breach", "last month") and
 exactly what it means in the data. Terms that are unclear or not in the data are flagged.
 
-![Catalog page](docs/images/catalog.png)
+| Light | Dark |
+|---|---|
+| ![Catalog page](docs/images/catalog.png) | ![Catalog page in dark mode](docs/images/catalog-dark.png) |
+
+**Evals**: scores the AI on a set of test questions whose correct answers are
+known, so any drop in accuracy is caught straight away.
+
+| Light | Dark |
+|---|---|
+| ![Evals page](docs/images/evals.png) | ![Evals page in dark mode](docs/images/evals-dark.png) |
 
 **Data check**: proof that the screens tell the truth. Every number the app shows is
 recalculated directly from the database and compared (25 of 25 match). You can also run your
 own read-only query here.
 
-![Data check page](docs/images/data-check.png)
-
-**Evals**: scores the AI on a set of test questions whose correct answers are
-known, so any drop in accuracy is caught straight away.
-
-![Evals page](docs/images/evals.png)
-
-**Light and dark**: the switch in the top-right corner of every page flips the whole app; the
-choice is remembered, and the first visit follows your operating system setting. The layout also
-adapts to tablets and phones (the sidebar becomes a menu).
-
-Every page has a dark version. Files in `docs/images/` use the page name plus `-dark`, for
-example `dashboard-dark.png`.
-
-![Home page in dark mode](docs/images/home-dark.png)
-![Ask page in dark mode](docs/images/ask-dark.png)
-![Dashboard page in dark mode](docs/images/dashboard-dark.png)
-![Explorer page in dark mode](docs/images/explorer-dark.png)
-![Incident page in dark mode](docs/images/incident-dark.png)
-![Catalog page in dark mode](docs/images/catalog-dark.png)
-![Evals page in dark mode](docs/images/evals-dark.png)
-![Data check page in dark mode](docs/images/data-check-dark.png)
+| Light | Dark |
+|---|---|
+| ![Data check page](docs/images/data-check.png) | ![Data check page in dark mode](docs/images/data-check-dark.png) |
