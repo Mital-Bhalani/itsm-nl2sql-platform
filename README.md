@@ -189,10 +189,18 @@ TanStack Query, Recharts) · pytest. The per-day breakdown is in [Status](#statu
 `db/` and `semantics/` use the standard library only. `httpx` is pinned to 0.27.2 because the
 pinned `openai` 1.51.2 breaks on newer versions.
 
-## Training programme
+## How this project was built
 
-This project was built over eight days **with Claude Code**: directing an AI coding assistant
-to build real software is the skill being taught. The running application calls OpenAI or
-Anthropic at runtime. Day 1 is the on-ramp: stand up the database, explore it in plain English,
-try the simplest "question → SQL" approach, and write down why it falls short. Days 2 to 8 fix
-that list and turn the result into a full application.
+The whole platform was written by directing **Claude Code**, an AI coding assistant, one day
+at a time. Claude Code is the build tool only. At runtime the app calls OpenAI or Anthropic to
+turn questions into SQL.
+
+- **Start from the failure.** Day 1 sends a bare question to a model with no context. It
+  invents tables, uses the wrong SQL dialect and guesses what "breach" means. That list of
+  mistakes became the plan.
+- **Fix with context, not code.** The semantic catalog tells the model what the data means.
+  When an answer was wrong, the usual fix was a clearer catalog entry, not a code change.
+- **Measure every change.** The golden set scores the agent after each fix, so an improvement
+  in one place cannot quietly break another.
+- **Check what users see.** The Data check page recomputes every number the UI shows directly
+  from the database.
