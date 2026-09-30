@@ -3,11 +3,16 @@ NL2SQL agent: plain-English question -> semantic catalog context -> OpenAI -> gu
 
     python agent/nl2sql.py "which assignment groups breached SLA most last month?"
     python agent/nl2sql.py --db db/tickets_large.sqlite "how many P1 incidents are open?"
+    python agent/nl2sql.py --provider anthropic "how many P1 incidents are open?"
 
 Everything the model is told about the data comes from the meta_* catalog in
 db/tickets.sqlite (built by semantics/build_catalog.py): table and column
 descriptions, join paths, metric SQL and the business glossary. Nothing about the
-schema is hard-coded here.
+schema is hard-coded here. The language model is reached through agent/llm.py (OpenAI or
+Anthropic, chosen per call or by LLM_PROVIDER).
+
+translate() turns a question into guarded SQL; ask() is the full pipeline used by the API:
+translate -> run -> one repair attempt if SQLite rejects the SQL -> answer in plain English.
 
 Guardrails:
     * questions that use a term the data cannot answer (e.g. "assignee") are refused
@@ -15,36 +20,36 @@ Guardrails:
     * exactly one statement, SELECT or WITH only; write/admin keywords are rejected
     * the database is opened read-only
     * LIMIT 1000 is appended when the query has no LIMIT
+    * a query running longer than 5 seconds is interrupted
     * users.name (personal data) is blocked at execution time by a SQLite authorizer
 """
 
 import argparse
-import os
+import json
 import re
 import sqlite3
 import sys
+import time
 from pathlib import Path
 
 sys.dont_write_bytecode = True  # keep the repo free of __pycache__
 
 ROOT = Path(__file__).resolve().parent.parent
 DB_PATH = ROOT / "db" / "tickets.sqlite"
-ENV_PATH = ROOT / ".env"
 sys.path.insert(0, str(ROOT / "semantics"))
+sys.path.insert(0, str(ROOT / "agent"))
 
 from build_catalog import AS_OF, find_term  # noqa: E402
+from llm import AgentAPIError, complete  # noqa: E402,F401  (AgentAPIError re-exported)
 
-DEFAULT_MODEL = "gpt-4o-mini"
 MAX_ROWS = 1000
+QUERY_TIMEOUT_MS = 5000
+ANSWER_ROWS = 50
 MAX_PHRASE_WORDS = 4
 PII_COLUMNS = {("users", "name")}
 WRITE_WORDS = re.compile(
     r"\b(insert|update|delete|drop|alter|create|replace|attach|detach|pragma|vacuum|"
     r"reindex|truncate|grant|revoke)\b", re.I)
-
-
-class AgentAPIError(RuntimeError):
-    """The language-model call failed (missing key, no credits, network). Not an SQL problem."""
 
 
 class UnsafeSQL(ValueError):
@@ -60,18 +65,28 @@ def _authorizer(action, arg1, arg2, _db, _trigger):
     return sqlite3.SQLITE_OK
 
 
-def connect_readonly(db_path=None):
-    """Open the database read-only; defaults to db/tickets.sqlite."""
+def connect_readonly(db_path=None, check_same_thread=True):
+    """
+    Open the database read-only; defaults to db/tickets.sqlite. The API passes
+    check_same_thread=False: each request owns its connection and uses it one step at a time,
+    but FastAPI may open it and use it on different worker threads.
+    """
     path = Path(db_path).resolve() if db_path else DB_PATH
     if not path.exists():
         raise FileNotFoundError(f"{path} not found. Run: python db/seed.py && "
                                 "python semantics/build_catalog.py")
-    return sqlite3.connect(f"file:{path.as_posix()}?mode=ro", uri=True)
+    return sqlite3.connect(f"file:{path.as_posix()}?mode=ro", uri=True,
+                           check_same_thread=check_same_thread)
 
 
-def run_sql(conn, sql):
-    """Execute guarded SQL read-only. Returns (columns, rows). Reading users.name raises UnsafeSQL."""
+def run_sql(conn, sql, timeout_ms=QUERY_TIMEOUT_MS):
+    """
+    Execute guarded SQL read-only. Returns (columns, rows). Reading users.name raises UnsafeSQL;
+    running longer than timeout_ms raises sqlite3.OperationalError.
+    """
+    deadline = time.monotonic() + timeout_ms / 1000
     conn.set_authorizer(_authorizer)
+    conn.set_progress_handler(lambda: 1 if time.monotonic() > deadline else 0, 10_000)
     try:
         cur = conn.execute(sql)
         return [d[0] for d in cur.description], [list(r) for r in cur.fetchall()]
@@ -79,9 +94,12 @@ def run_sql(conn, sql):
         message = str(exc).lower()
         if "prohibited" in message or "not authorized" in message:  # raised by _authorizer
             raise UnsafeSQL("query reads personal data (users.name)") from exc
+        if "interrupted" in message:
+            raise sqlite3.OperationalError(f"query timed out after {timeout_ms / 1000:g} s") from exc
         raise
     finally:
         conn.set_authorizer(None)
+        conn.set_progress_handler(None, 0)
 
 
 # -----------------------------------------------------------------------------
@@ -178,31 +196,9 @@ def build_context(conn, resolved):
 # -----------------------------------------------------------------------------
 #  Model call and SQL guardrails
 # -----------------------------------------------------------------------------
-def _load_env():
-    if ENV_PATH.is_file():
-        for line in ENV_PATH.read_text(encoding="utf-8").splitlines():
-            line = line.strip()
-            if line and not line.startswith("#") and "=" in line:
-                key, value = line.split("=", 1)
-                os.environ.setdefault(key.strip(), value.strip().strip("\"'"))
-
-
-def call_model(system_prompt, question):
-    _load_env()
-    try:
-        import openai
-    except ModuleNotFoundError as exc:
-        raise AgentAPIError("The 'openai' package is not installed: pip install -r requirements.txt") from exc
-    try:
-        client = openai.OpenAI()
-        reply = client.chat.completions.create(
-            model=os.getenv("OPENAI_MODEL", DEFAULT_MODEL),
-            temperature=0,
-            messages=[{"role": "system", "content": system_prompt},
-                      {"role": "user", "content": question}])
-    except openai.OpenAIError as exc:
-        raise AgentAPIError(f"{type(exc).__name__}: {exc}") from exc
-    return reply.choices[0].message.content or ""
+def call_model(system_prompt, question, provider=None, model=None):
+    """One model call through agent/llm.py. Returns an LLMReply (text, provider, model, usage)."""
+    return complete(system_prompt, question, provider=provider, model=model)
 
 
 def extract_sql(text):
@@ -240,29 +236,171 @@ def guard_sql(sql):
 # -----------------------------------------------------------------------------
 #  Public entry point
 # -----------------------------------------------------------------------------
-def translate(question, conn=None):
+def _note_usage(result, reply):
+    """Record which model answered and add its latency and token counts to the result."""
+    result["provider"], result["model"] = reply.provider, reply.model
+    result["llm_ms"] = result.get("llm_ms", 0) + reply.latency_ms
+    for key in ("tokens_in", "tokens_out"):
+        value = getattr(reply, key)
+        if value is not None:
+            result[key] = (result.get(key) or 0) + value
+
+
+def _set_sql(result, reply_text):
+    sql, assumption = extract_sql(reply_text)
+    result["assumption"] = assumption or result.get("assumption")
+    try:
+        result["sql"], result["unsafe"] = guard_sql(sql), None
+    except UnsafeSQL as exc:
+        result["sql"], result["unsafe"] = sql, str(exc)
+
+
+def translate(question, conn=None, provider=None, model=None, keep_context=False):
     """
     Translate a question into guarded SQL.
-    Returns {question, terms, refusal, sql, assumption, unsafe}. Raises AgentAPIError when the
-    model cannot be reached.
+    Returns {question, terms, refusal, sql, assumption, unsafe, provider, model, llm_ms,
+    tokens_in, tokens_out}. Raises AgentAPIError when the model cannot be reached.
     """
     own = conn is None
     conn = conn or connect_readonly()
     try:
         resolved = resolve_terms(conn, question)
         result = {"question": question, "terms": [(p, e["term"]) for p, e in resolved],
-                  "refusal": None, "sql": None, "assumption": None, "unsafe": None}
+                  "refusal": None, "sql": None, "assumption": None, "unsafe": None,
+                  "provider": None, "model": None, "llm_ms": 0,
+                  "tokens_in": None, "tokens_out": None}
         blocked = [e for _, e in resolved if not e["is_answerable"]]
         if blocked:
             e = blocked[0]
             result["refusal"] = f"Cannot answer: '{e['term']}' is not in the data. {e['definition']}"
             return result
-        reply = call_model(build_context(conn, resolved), question)
-        sql, result["assumption"] = extract_sql(reply)
+        context = build_context(conn, resolved)
+        reply = call_model(context, question, provider, model)
+        _note_usage(result, reply)
+        _set_sql(result, reply.text)
+        if keep_context:
+            result["context"] = context
+        return result
+    finally:
+        if own:
+            conn.close()
+
+
+ANSWER_PROMPT = (
+    "You are a service-desk reporting analyst. Answer the manager's question in one to three "
+    "plain-English sentences using ONLY the query result given. Quote the numbers exactly as "
+    "they appear (add % only when the column is a percentage). If the result is empty, say that "
+    "no matching records were found. If an assumption is listed, mention it briefly. Do not "
+    "mention SQL, tables or columns.\n\n"
+    "Also suggest three short follow-up questions a service manager might ask next that this "
+    "data can answer (teams, priorities, statuses, SLA breaches, MTTR, reopen rate, changes by "
+    "risk, time periods). Never suggest questions about named people, assignees or callers.\n\n"
+    'Reply with JSON only: {"answer": "...", "followups": ["...", "...", "..."]}')
+
+
+def _fallback_answer(columns, rows, truncated):
+    if not rows:
+        return "No matching records were found."
+    if len(rows) == 1 and len(columns) == 1:
+        return f"The answer is {rows[0][0]}."
+    more = f" (capped at {len(rows)})" if truncated else ""
+    return f"{len(rows)} rows returned{more}; see the table below."
+
+
+def parse_answer(text):
+    """(answer, followups) from the model's JSON reply; plain text is taken as the answer."""
+    match = re.search(r"\{.*\}", text, re.S)
+    if match:
         try:
-            result["sql"] = guard_sql(sql)
-        except UnsafeSQL as exc:
-            result["sql"], result["unsafe"] = sql, str(exc)
+            data = json.loads(match.group(0))
+        except ValueError:
+            data = None
+        if isinstance(data, dict) and isinstance(data.get("answer"), str):
+            followups = [f.strip() for f in data.get("followups") or [] if isinstance(f, str) and f.strip()]
+            return data["answer"].strip(), followups[:3]
+    return text.strip(), []
+
+
+def summarise(question, result):
+    """
+    Plain-English answer and follow-up questions from the rows. Returns (answer, followups);
+    falls back to a fixed sentence and no follow-ups if the model fails.
+    """
+    columns, rows = result["columns"], result["rows"]
+    payload = {"question": question, "assumption": result["assumption"], "columns": columns,
+               "rows": rows[:ANSWER_ROWS], "total_rows": len(rows)}
+    fallback = _fallback_answer(columns, rows, result["truncated"])
+    try:
+        reply = call_model(ANSWER_PROMPT, json.dumps(payload, default=str),
+                           result["provider"], result["model"])
+    except AgentAPIError:
+        return fallback, []
+    _note_usage(result, reply)
+    answer, followups = parse_answer(reply.text)
+    return answer or fallback, followups
+
+
+def _execute(conn, result):
+    """Run result['sql']; on failure set result['error'] (and 'unsafe') and return False."""
+    try:
+        columns, rows = run_sql(conn, result["sql"])
+    except UnsafeSQL as exc:
+        result["unsafe"], result["error"] = str(exc), f"Blocked by guardrail: {exc}"
+        return False
+    result.update(columns=columns, rows=rows, row_count=len(rows),
+                  truncated=len(rows) >= MAX_ROWS)
+    return True
+
+
+def ask(question, conn=None, provider=None, model=None, answer=True):
+    """
+    Full pipeline: translate, run read-only, repair once on an SQLite error, answer in words.
+    Returns translate()'s keys plus {answer, followups, error, columns, rows, row_count, truncated,
+    repaired, timings}. Raises AgentAPIError when the SQL model call itself fails.
+    """
+    own = conn is None
+    conn = conn or connect_readonly()
+    started = time.perf_counter()
+    try:
+        result = translate(question, conn, provider, model, keep_context=True)
+        context = result.pop("context", None)
+        result.update(answer=None, followups=[], error=None, columns=[], rows=[], row_count=0,
+                      truncated=False, repaired=False, timings={})
+        if result["refusal"]:
+            result["answer"] = result["refusal"]
+        elif result["unsafe"]:
+            result["error"] = f"Blocked by guardrail: {result['unsafe']}"
+        else:
+            sql_started = time.perf_counter()
+            try:
+                ok = _execute(conn, result)
+            except sqlite3.Error as exc:
+                repair = (f"{question}\n\nYour previous SQL failed.\n```sql\n{result['sql']}\n```\n"
+                          f"SQLite error: {exc}\nReturn the corrected SQL only.")
+                try:
+                    reply = call_model(context, repair, result["provider"], result["model"])
+                except AgentAPIError as api_exc:
+                    result["error"] = f"Query failed: {exc} (repair call failed: {api_exc})"
+                    result["timings"]["total_ms"] = round((time.perf_counter() - started) * 1000)
+                    return result
+                _note_usage(result, reply)
+                _set_sql(result, reply.text)
+                result["repaired"] = True
+                ok = False
+                if result["unsafe"]:
+                    result["error"] = f"Blocked by guardrail: {result['unsafe']}"
+                else:
+                    try:
+                        ok = _execute(conn, result)
+                    except sqlite3.Error as exc2:
+                        result["error"] = f"Query failed after one repair attempt: {exc2}"
+            result["timings"]["sql_ms"] = round((time.perf_counter() - sql_started) * 1000)
+            if ok and answer:
+                result["answer"], result["followups"] = summarise(question, result)
+            elif ok:
+                result["answer"] = _fallback_answer(result["columns"], result["rows"], result["truncated"])
+        result["timings"]["llm_ms"] = result["llm_ms"]
+        result["timings"]["total_ms"] = round((time.perf_counter() - started) * 1000)
         return result
     finally:
         if own:
@@ -274,27 +412,32 @@ def main():
     parser.add_argument("question", nargs="+", help="the question in plain English")
     parser.add_argument("--db", type=Path, default=None,
                         help="database to query (default db/tickets.sqlite)")
+    parser.add_argument("--provider", default=None, help="openai or anthropic (default LLM_PROVIDER)")
+    parser.add_argument("--model", default=None, help="model name (default: the provider's)")
     args = parser.parse_args()
     question = " ".join(args.question)
     conn = connect_readonly(args.db)
     try:
-        result = translate(question, conn)
+        result = ask(question, conn, args.provider, args.model)
     except AgentAPIError as exc:
         sys.exit(f"Model call failed: {exc}")
+    finally:
+        conn.close()
     print(f"Question: {question}")
     print(f"Terms:    {', '.join(f'{p} -> {t}' for p, t in result['terms']) or '(none)'}")
     if result["refusal"]:
         print(result["refusal"])
         return
+    print(f"Model:    {result['provider']} / {result['model']}")
     if result["assumption"]:
         print(f"Assumed:  {result['assumption']}")
-    print(f"SQL:\n{result['sql']}")
-    if result["unsafe"]:
-        sys.exit(f"Blocked: {result['unsafe']}")
-    try:
-        columns, rows = run_sql(conn, result["sql"])
-    except (UnsafeSQL, sqlite3.Error) as exc:
-        sys.exit(f"Query failed: {exc}")
+    print(f"SQL{' (repaired)' if result['repaired'] else ''}:\n{result['sql']}")
+    if result["error"]:
+        sys.exit(result["error"])
+    print(f"\nAnswer:   {result['answer']}")
+    for followup in result["followups"]:
+        print(f"  next?   {followup}")
+    columns, rows = result["columns"], result["rows"]
     print("\n" + " | ".join(columns))
     for row in rows[:50]:
         print(" | ".join(str(v) for v in row))

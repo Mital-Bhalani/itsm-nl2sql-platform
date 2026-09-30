@@ -9,14 +9,19 @@ month?"*. The platform writes the SQL, runs it **read-only**, and answers in pla
 
 ## Status
 
-| Stage | What | Status |
-|---|---|---|
-| Day 1 | ITSM database, synthetic data, naive "question → SQL" spike | ✅ Built — spike not yet run (OpenAI account needs credits) |
-| Day 2 | Semantic layer (`meta_*` catalog) | 🟡 In progress — columns, metrics, glossary done; table and join descriptions to do |
-| Day 2 | Evaluation set (accuracy) | ⬜ Planned |
-| Day 2–3 | NL2SQL agent loop with guardrails | ⬜ Planned |
-| Day 3 | HTTP API (FastAPI `/ask`) | ⬜ Planned |
-| Day 4 | Web UI (Streamlit) | ⬜ Planned |
+All eight days are done. Each day added one layer on top of the previous ones; the stack
+column lists only what that day introduced.
+
+| Day | What was built | Stack added | Status |
+|---|---|---|---|
+| 1 | ITSM database (5 tables), deterministic synthetic data, naive "question → SQL" spike | SQLite (STRICT tables), Python standard library, OpenAI SDK | ✅ Done |
+| 2 | Semantic layer: `meta_*` catalog of columns, metrics, glossary, tables and joins, with self-checks | SQL fragments stored in SQLite (`meta_*` tables) | ✅ Done |
+| 3 | Evaluation harness: 15-question golden set, scoring, self-test, 50,000-incident large dataset | PyYAML | ✅ Done |
+| 4 | NL2SQL agent: catalog context, guardrails (read-only, SELECT-only, auto-LIMIT, PII block, timeout), one SQL repair, plain-English answers with follow-ups | OpenAI gpt-4o-mini, SQLite authorizer and progress handler | ✅ Done, 15/15 live |
+| 5 | Multi-model: OpenAI and Anthropic Claude, switchable per question, with fallback | Anthropic SDK (Claude Opus 5.5), python-dotenv | ✅ Done |
+| 6 | HTTP API: ask, KPIs, table explorer, incidents, catalog, evals, SQL console, UI-vs-database check; API key, rate limit, audit log | FastAPI, Uvicorn, Pydantic | ✅ Done |
+| 7 | Streamlit UI: Ask, Dashboard, Explorer, Incident, Catalog, Evals, Data check | Streamlit, pandas, Altair | ✅ Done |
+| 8 | React UI with the same pages, served by the API at `/web/`; automated test suite (50 tests) | React 19, TypeScript, Vite, Tailwind CSS 4, TanStack Query, Recharts, pytest | ✅ Done |
 
 ## Quick start
 
@@ -38,6 +43,32 @@ python evals/run_evals.py --golden evals/golden_set_large.yaml
 
 In Claude Code, `/build-large` does all of this in one step (seed, catalog, golden set and a
 self-test); add `live` to also run the evals against the OpenAI API.
+
+### Run the application
+
+```bash
+cp .env.example .env                # set OPENAI_API_KEY (and ANTHROPIC_API_KEY for Claude)
+python run_app.py                   # API on :8000 (docs at /docs), UI on http://localhost:8501
+```
+
+The React front end (needs Node.js 20+) is built once and then served by the API:
+
+```bash
+cd web && npm install && npm run build    # then open http://127.0.0.1:8000/web/
+```
+
+Ask a question from the command line instead:
+
+```bash
+python agent/nl2sql.py "which assignment groups breached SLA most last month?"
+python agent/nl2sql.py --provider anthropic "how many P1 incidents are open?"
+```
+
+Tests (no API key needed; they build their own database in a temp folder):
+
+```bash
+python -B -m pytest tests -p no:cacheprovider
+```
 
 To run the Day 1 spike, which calls the OpenAI API:
 
@@ -91,10 +122,15 @@ python evals/run_evals.py --self-test    # expects 15/15, no API key needed
 ├── semantics/
 │   └── build_catalog.py      # builds the meta_* semantic layer inside the database
 ├── agent/
+│   ├── nl2sql.py             # the agent: catalog context → model → guarded SQL → rows → answer
+│   ├── llm.py                # model providers (OpenAI, Anthropic), fallback, usage
 │   └── naive_spike.py        # Day 1 spike: question → OpenAI → SQL, no context, no guardrails
-├── evals/                    # accuracy test set                 (planned)
-├── api/                      # FastAPI service                    (planned)
-├── ui/                       # Streamlit front end                (planned)
+├── evals/                    # golden sets, eval runner, golden-set generator
+├── api/                      # FastAPI service (see api/README.md)
+├── ui/                       # Streamlit front end (see ui/README.md)
+├── web/                      # React + TypeScript front end (see web/README.md)
+├── tests/                    # pytest: guardrails, providers, API end to end (fake model)
+├── run_app.py                # starts the API and the UI together
 ├── CLAUDE.md                 # detailed project memory and handoff notes
 └── requirements.txt
 ```
@@ -140,19 +176,23 @@ exists, no phrase maps to two meanings, and plural phrases ("tickets", "P1s") re
 
 ## Safety rules
 
-The finished platform will enforce: **read-only** access · **SELECT-only** queries ·
-**automatic row LIMIT** · **no personal data** in answers.
+Enforced in the agent and the API: **read-only** database · **one SELECT only** ·
+**automatic `LIMIT 1000`** · **5-second query timeout** · **no personal data** (`users.name`
+blocked and masked) · questions about data that does not exist are **refused** · optional API
+key, per-client rate limit and an **audit log** of every question with its SQL and model.
 
 ## Tech stack
 
-Python · SQLite (portable to Postgres/Snowflake later) · OpenAI API at runtime.
+Python · SQLite (portable to Postgres/Snowflake later) · OpenAI or Anthropic API at runtime ·
+FastAPI + Uvicorn · Streamlit (pandas, Altair) · React + TypeScript (Vite, Tailwind CSS,
+TanStack Query, Recharts) · pytest. The per-day breakdown is in [Status](#status).
 `db/` and `semantics/` use the standard library only. `httpx` is pinned to 0.27.2 because the
 pinned `openai` 1.51.2 breaks on newer versions.
 
 ## Training programme
 
-This project is built over four days **with Claude Code** — directing an AI coding assistant to
-build real software is the skill being taught. The running application itself calls the OpenAI
-API. Day 1 is the on-ramp: stand up the database, explore it in plain English, try the simplest
-"question → SQL" approach, and write down why it falls short. The rest of the week fixes that
-list.
+This project was built over eight days **with Claude Code**: directing an AI coding assistant
+to build real software is the skill being taught. The running application calls OpenAI or
+Anthropic at runtime. Day 1 is the on-ramp: stand up the database, explore it in plain English,
+try the simplest "question → SQL" approach, and write down why it falls short. Days 2 to 8 fix
+that list and turn the result into a full application.

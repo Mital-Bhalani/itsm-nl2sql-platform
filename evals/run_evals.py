@@ -6,6 +6,7 @@ Eval harness: score the NL2SQL agent on evals/golden_set.yaml by execution accur
     python evals/run_evals.py --self-test  # no API: feeds each reference_sql through the same
                                            # guardrails, execution and scoring; must be 100%
     python evals/run_evals.py --golden evals/golden_set_large.yaml   # the large database
+    python evals/run_evals.py --provider anthropic [--model NAME]    # score another model
 
 For each question the agent's SQL is run read-only on the golden file's `database`
 (db/tickets.sqlite by default) and its rows are compared with the expected rows:
@@ -33,6 +34,7 @@ ROOT = Path(__file__).resolve().parent.parent
 GOLDEN_SET = ROOT / "evals" / "golden_set.yaml"
 sys.path.insert(0, str(ROOT / "agent"))
 
+import llm  # noqa: E402
 import nl2sql  # noqa: E402
 
 MAX_PERMUTED_COLUMNS = 8
@@ -94,7 +96,7 @@ def results_match(actual_rows, expected_rows, order_matters, tolerance):
 # -----------------------------------------------------------------------------
 #  Scoring one question
 # -----------------------------------------------------------------------------
-def score(item, conn, self_test):
+def score(item, conn, self_test, provider=None, model=None):
     expected = item["expected"]
     result = {"id": item["id"], "category": item["category"], "question": item["question"],
               "status": None, "generated_sql": None, "assumption": None, "terms": [],
@@ -107,7 +109,7 @@ def score(item, conn, self_test):
             refused = bool(blocked)
             result["error"] = None if refused else "no unanswerable term found"
         else:
-            out = nl2sql.translate(item["question"], conn)
+            out = nl2sql.translate(item["question"], conn, provider, model)
             result["terms"], result["generated_sql"] = out["terms"], out["sql"]
             refused = bool(out["refusal"])
             result["error"] = out["refusal"] if refused else "answered instead of refusing"
@@ -117,7 +119,7 @@ def score(item, conn, self_test):
     if self_test:
         raw_sql, unsafe = item["reference_sql"], None
     else:
-        out = nl2sql.translate(item["question"], conn)
+        out = nl2sql.translate(item["question"], conn, provider, model)
         result["terms"], result["assumption"] = out["terms"], out["assumption"]
         if out["refusal"]:
             result["status"], result["error"] = "no_sql", out["refusal"]
@@ -178,6 +180,9 @@ def main():
                         help="golden-set file (default evals/golden_set.yaml)")
     parser.add_argument("--db", type=Path, default=None,
                         help="database to query (default: the golden file's `database` field)")
+    parser.add_argument("--provider", default=None,
+                        help="model provider: openai or anthropic (default LLM_PROVIDER)")
+    parser.add_argument("--model", default=None, help="model name (default: the provider's)")
     args = parser.parse_args()
 
     golden = load_golden_file(args.golden)
@@ -187,7 +192,7 @@ def main():
     results = []
     for item in questions:
         try:
-            results.append(score(item, conn, args.self_test))
+            results.append(score(item, conn, args.self_test, args.provider, args.model))
         except nl2sql.AgentAPIError as exc:
             message = (f"Run stopped at {item['id']}: the model call failed, so no accuracy is "
                        f"reported. {exc}")
@@ -201,7 +206,10 @@ def main():
 
     passed = sum(r["status"] == "pass" for r in results)
     total = len(results)
+    provider = None if args.self_test else (args.provider or llm.default_provider())
+    model = None if args.self_test else (args.model or llm.default_model(provider))
     report = {"mode": "self-test" if args.self_test else "live",
+              "provider": provider, "model": model,
               "golden_set": Path(args.golden).name, "database": Path(db_path).name,
               "total": total, "passed": passed,
               "execution_accuracy": round(passed / total, 4) if total else 0.0, "results": results}
@@ -209,7 +217,8 @@ def main():
     if args.json:
         print(json.dumps(report, ensure_ascii=False, indent=2))
         return
-    print(f"Eval run ({report['mode']}) on {report['golden_set']} against {report['database']}\n")
+    model_note = f", {provider} / {model}" if provider else ""
+    print(f"Eval run ({report['mode']}{model_note}) on {report['golden_set']} against {report['database']}\n")
     for r in results:
         line = f"  {r['status'].upper():<13} {r['id']}  {r['question']}"
         if r["status"] != "pass" and r["error"]:

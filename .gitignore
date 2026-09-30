@@ -19,6 +19,9 @@ facilitator/
 *_Delivery_and_Build_Plan.docx
 *.pptx
 
+# --- Runtime logs (audit trail of questions asked through the API) ---
+logs/
+
 # --- Python ---
 __pycache__/
 *.py[cod]

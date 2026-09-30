@@ -3,6 +3,13 @@
 # db/seed.py and semantics/build_catalog.py use the standard library only.
 # Runtime dependencies for the NL2SQL app:
 openai==1.51.2          # runtime: the app calls the OpenAI API to generate SQL
+anthropic==1.9.0        # runtime: the second model provider (Claude); uses httpx2, not httpx
 python-dotenv==1.0.1    # loads OPENAI_API_KEY from .env (agent/naive_spike.py reads .env itself)
 pyyaml==6.0.2           # evals/run_evals.py reads evals/golden_set.yaml
 httpx==0.27.2          # openai 1.51.2 breaks on httpx>=0.28 ("unexpected keyword argument 'proxies'")
+# Application: API (FastAPI) and UI (Streamlit; brings pandas and altair)
+fastapi==0.141.1
+uvicorn==0.54.0
+streamlit==1.64.0
+# Tests
+pytest==9.1.1

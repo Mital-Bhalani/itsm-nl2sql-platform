@@ -6,16 +6,18 @@ writes SQL, runs it **read-only**, and answers in plain English — **with the S
 
 **Build tool vs runtime (keep these separate):**
 - We **BUILD** this platform **with Claude Code** — that is the skill being taught.
-- The **running app** calls the **OpenAI API** at runtime to generate SQL.
+- The **running app** calls a language model at runtime to generate SQL: **OpenAI** (default)
+  or **Anthropic Claude**, chosen per question or by `LLM_PROVIDER` (`agent/llm.py`).
 
 **Stack:** Python 3.11+ · SQLite 3.37+ (STRICT tables; swappable to Postgres/Snowflake later) ·
 stdlib where possible. `db/` and `semantics/` are stdlib only. `requirements.txt` pins
-`openai==1.51.2`, `python-dotenv==1.0.1` and `httpx==0.27.2`; the spike currently needs only
-`openai` (it parses `.env` itself). **Keep the httpx pin** while openai is 1.51.2: httpx 0.28+
+`openai==1.51.2`, `anthropic==1.9.0`, `python-dotenv==1.0.1`, `pyyaml`, `httpx==0.27.2`,
+`fastapi`, `uvicorn`, `streamlit` and `pytest` (all exact pins; `pip check` clean). **Keep the httpx pin** while openai is 1.51.2: httpx 0.28+
 makes `OpenAI()` crash with `unexpected keyword argument 'proxies'`. Drop the pin only if openai
 is upgraded (to 1.55.3 or later).
 
-**Current objective:** Day 2 — finish the semantic catalog, then evals and the agent loop.
+**Current objective (2026-09-29):** end-product build done — multi-model agent, FastAPI
+backend, Streamlit UI with a UI-vs-database check, pytest suite. Next: the open items below.
 
 ## Build and run (in this order)
 
@@ -25,6 +27,9 @@ python semantics/build_catalog.py   # adds the meta_* semantic catalog to db/tic
 python agent/nl2sql.py "question"   # NL2SQL agent: catalog context -> OpenAI -> guarded SQL -> rows
 python evals/run_evals.py           # score the agent on evals/golden_set.yaml (--json, --self-test, --golden)
 python agent/naive_spike.py         # Day 1 naive spike (no context; shows why the agent is needed)
+python run_app.py                   # API :8000 (/docs) + Streamlit UI :8501, Ctrl+C stops both
+cd web && npm run build            # React UI -> web/dist, served by the API at /web/ (npm run dev: :5173)
+python -B -m pytest tests -p no:cacheprovider   # 50 tests, no API key, temp DB outside repo
 ```
 
 Slash commands: `/smoke` (rebuild + checks), `/build-catalog` (rebuild catalog, report
@@ -75,11 +80,13 @@ read-only · **SELECT-only** · auto-LIMIT · **no raw PII in output** (`users.n
 | folder | day | status |
 |---|---|---|
 | `db/` | 1 | **done**: `schema.sql`, `seed.py`, generated `tickets.sqlite` (gitignored `*.sqlite`) |
-| `agent/` | 1 → 2–3 | `naive_spike.py` (Day 1) and **`nl2sql.py` (agent) working**; no answer-in-words step yet |
+| `agent/` | 1 → 2–3 | `naive_spike.py`, **`nl2sql.py`** (agent: `translate`, `ask`), **`llm.py`** (providers) |
 | `semantics/` | 2 | **done**: `build_catalog.py` fills all five meta_* tables |
 | `evals/` | 2 | **working**: `golden_set.yaml` (15 questions) + `run_evals.py` |
-| `api/` | 3 | not started (FastAPI `/ask`) |
-| `ui/` | 4 | not started (Streamlit) |
+| `api/` | 3 | **done**: FastAPI (`main.py`, `services.py`, `schemas.py`, `config.py`) |
+| `ui/` | 4 | **done**: Streamlit `Home.py` + `pages/1_Ask … 7_Incident`, `api_client.py`, `assets/` |
+| `web/` | 4+ | **done**: React 19 + TS + Tailwind 4 + TanStack Query + Recharts; built to `web/dist`, served at `/web/` |
+| `tests/` | — | **done**: pytest, 50 tests (guardrails, providers, API with a fake model) |
 
 `scripts/`, `docs/` and `spike/` from the original plan were not created: the data generator
 lives in `db/seed.py` and the spike in `agent/naive_spike.py`. There is no `db/build_db.py`.
@@ -207,7 +214,71 @@ byte-identically).
    `LIMIT 1000` appended if missing, `users.name` blocked by a SQLite authorizer (also via
    `SELECT *`). API failures raise `AgentAPIError`.
 
+**`ask(question, conn, provider, model, answer=True)`** = full pipeline used by the API:
+translate → run → on an SQLite error **one repair call** (error + failed SQL sent back) →
+**plain-English answer** (second call with ≤50 rows; falls back to a fixed sentence if it
+fails). Adds `answer, error, columns, rows, row_count, truncated, repaired, provider, model,
+tokens_in/out, timings`. `run_sql` has a **5 s timeout** (progress handler).
+
+## Model providers (`agent/llm.py`)
+
+`complete(system, user, provider=None, model=None)` → `LLMReply(text, provider, model,
+latency_ms, tokens_in, tokens_out)`. Providers: `openai` (default model `gpt-4o-mini`,
+temperature 0) and `anthropic` (default `claude-opus-5-5`, effort `low`, system prompt marked
+for prompt caching, server-side refusal fallback `fallbacks="default"`; current Claude models
+reject `temperature`). Env: `LLM_PROVIDER`, `LLM_MODEL`, `LLM_FALLBACK_PROVIDER`,
+`OPENAI_API_KEY`/`OPENAI_MODEL`, `ANTHROPIC_API_KEY`/`ANTHROPIC_MODEL`. Fallback applies only
+when no provider was requested explicitly. All failures raise `AgentAPIError` (re-exported by
+`nl2sql`). `anthropic` 1.x uses `httpx2`, so it does not conflict with the `httpx==0.27.2` pin.
+**Anthropic has not been run live yet** (no `ANTHROPIC_API_KEY` as of 2026-09-29); it is
+covered only by mocked tests.
+
+## API and UI (`api/`, `ui/`, `run_app.py`)
+
+- API endpoints: `/health`, `/api/models`, `/api/overview`, `POST /api/ask`, `/api/kpis`,
+  `/api/groups`, `/api/tables[/{name}]` (filters `f_<col>`), `/api/incidents/{id}`,
+  `/api/catalog/{section}`, `/api/reconcile`, `POST /api/sql`, `POST/GET /api/evals[/{id}]`
+  (background thread, in memory). All take `dataset=default|large`. Details in `api/README.md`.
+- KPIs are composed from `meta_metrics` fragments (no formulas in the API); breach count =
+  rate × resolved. Verified against the seed facts (66/440, Aug counts 4/3/2/1/0).
+- Security: `APP_API_KEY` → `X-API-Key` required on `/api/*`; rate limit on `/api/ask` and
+  `/api/sql` (`RATE_LIMIT_PER_MIN`, default 30); audit log `logs/audit.jsonl` (gitignored);
+  explorer names whitelisted from `meta_columns`, values bound; `users.name` masked and
+  authorizer-blocked.
+- UI talks only to the API. Sidebar: dataset, provider, model (kept across pages), connected
+  DB file + last-changed time, **Refresh from database** (UI caches API answers 10 s).
+  Ask page can **compare two models** side by side, draws a chart automatically, offers three
+  follow-up questions (the answer call returns JSON `{answer, followups}`; `parse_answer`
+  falls back to plain text) and records thumbs up/down via `POST /api/feedback`.
+- UI polish (2026-09-29): theme in `.streamlit/config.toml` (root), logo in `ui/assets/`,
+  `hero()` header band; dashboard sparklines + period deltas (`delta_color="inverse"` for
+  breaches/MTTR/reopen) and click-a-team drill-down to the explorer (`st.switch_page`, preset
+  via session_state keys `explorer_table` / `incidents_assignment_group_id`); incident page
+  `7_Incident.py` (gauge, timeline, `/api/incidents/{id}/similar`). `st.switch_page` cannot run
+  in Streamlit's AppTest (single page); verify page jumps in the real app.
+- **React UI (`web/`, 2026-09-29):** same pages as Streamlit, hash routes, same-origin API calls
+  (Vite dev proxy / FastAPI `StaticFiles` mount at `/web`, `/` redirects there). Node 24 LTS
+  installed system-wide with winget (first attempt without admin used a portable copy, since
+  removed). Checked with headless Edge screenshots (`msedge --headless=new --screenshot`).
+  Bugs found that way: (1) **API connections crossed threads** (FastAPI opens the dependency
+  and runs the endpoint on different workers; parallel React requests gave HTTP 500) - fixed
+  with `connect_readonly(check_same_thread=False)` in `services.connect`, regression test
+  `test_connection_works_across_threads`; (2) React effect returned `scrollIntoView()`'s
+  Promise (newer Chromium) and crashed the page - effects use braces; (3) Recharts
+  animations never finish headless - `isAnimationActive={false}`. `web/` sits in OneDrive:
+  `node_modules` syncs too (small, 67 packages). Streamlit worker threads must not touch
+  `st.session_state` (bug found and fixed in `1_Ask.py`).
+- **UI ↔ database check** (page `6_Data_Check.py`, `/api/reconcile`): 25 checks compare every
+  number the UI shows with SQL written separately from `meta_metrics` (`services.DIRECT_CHECKS`,
+  from the schema-header definitions); 25/25 on both datasets. `/api/sql` = user SQL console
+  through `guard_sql` + `run_sql`. The API opens the database per request, so changes show up
+  live (a test inserts a row and sees it without restart).
+- `run_app.py` sets `PYTHONDONTWRITEBYTECODE=1`; binds 127.0.0.1 by default.
+
 ## Evals (`evals/golden_set.yaml`, `evals/run_evals.py`)
+
+`--provider` / `--model` score another model; the JSON report records them. Live OpenAI after
+the provider refactor: **15/15** (2026-09-29).
 
 15 questions (4 easy lookups, 4 date ranges, 4 multi-table joins, 3 edge cases incl. a
 refusal). Expected rows were generated by running each `reference_sql`; regenerate them if
@@ -254,11 +325,19 @@ alongside these fixes is not proof of general accuracy; grow the golden set (ope
 2. Resolve the flagged ambiguities with the business (especially Resolved vs Closed).
 3. Add plural questions ("how many tickets…", "which teams…"), a Cancelled-P1 case for E02,
    and different-answer readings of "next week" to the golden set.
-4. Agent: turn rows into a plain-English answer (with the SQL shown); then Day 3 API, Day 4 UI.
+4. Add `ANTHROPIC_API_KEY` and run `python evals/run_evals.py --provider anthropic` to get a
+   real Claude score (not yet measured).
 5. **Rotate the OpenAI key**: it was pasted into a chat session.
 6. Optional: priority synonyms "urgent", "highest/lowest priority", "moderate/normal priority"
    were dropped when the vocabulary was standardised; re-add to `PRIORITY_LEVELS` if wanted.
 7. Decide whether the spike should take the question as a CLI argument.
+8. Production gaps still open: no Dockerfile/CI (Docker not installed here); eval jobs and rate
+   limits are in-memory (single process); no user accounts/SSO (one shared API key); the
+   whole catalog is sent on every call (cached for Claude only); `AS_OF` is fixed for the
+   synthetic data and must become the real clock on real data.
+9. 2026-09-29: CLAUDE.md was once overwritten on disk by an older version from outside the
+   session (suspected OneDrive sync); restored from git. If it happens again, compare with
+   `git show HEAD:CLAUDE.md` before editing.
 
 Closed gaps (2026-09-28): no High-risk change next week → pinned changes 91/92 in `seed.py`;
 plural words missed by glossary lookup → `find_term()` / `singular()` in `build_catalog.py`.
