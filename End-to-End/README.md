@@ -52,7 +52,7 @@ flowchart TB
     N --> L --> AI
 ```
 
-## Five facts to remember
+## Four facts to remember
 
 1. **The front ends only talk to the API.** Neither UI opens the database or calls an AI model.
 2. **The database is always opened read-only.** Nothing in the running app can change data.
@@ -60,4 +60,3 @@ flowchart TB
    `meta_*` tables and read at runtime.
 4. **Every number is checkable.** Every answer shows its SQL, and the Data check page
    recalculates every number on screen straight from the database.
-5. **"Today" is fixed at 28 Sep 2026** for the synthetic data, so answers are repeatable.
