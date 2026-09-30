@@ -72,7 +72,7 @@ Every tracked file in the repository, grouped by folder. Files marked *(generate
 │
 ├── evals/                         ACCURACY (chapter 8)
 │   ├── README.md                  How scoring works
-│   ├── golden_set.yaml            51 questions with reference SQL and expected rows
+│   ├── golden_set.yaml            80 questions with reference SQL and expected rows
 │   ├── golden_set_large.yaml      The same for the 50k database
 │   ├── make_golden_set.py         Generates both golden sets from their reference SQL
 │   └── run_evals.py               Scores the agent (live or self-test), JSON report option

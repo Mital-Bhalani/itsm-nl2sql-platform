@@ -27,7 +27,7 @@ and exits with an error if anything is wrong.
 | `meta_columns` | 23 | column | `data_type`, `allowed_values`, `references_to`, `description`, `example_value`, `synonyms`, `is_pii`, `is_ambiguous` + `ambiguity_note` |
 | `meta_joins` | 4 | foreign key | `cardinality`, `notes` (pitfalls, e.g. count with `COUNT(i.id)`) |
 | `meta_metrics` | 3 | metric | `sql_expression`, `base_table`, `required_joins`, `filters`, `time_column`, `unit`, `notes` |
-| `meta_glossary` | 43 | business term | `kind`, `synonyms`, `definition`, `sql_hint`, `is_answerable`, `is_ambiguous` |
+| `meta_glossary` | 51 | business term | `kind`, `synonyms`, `definition`, `sql_hint`, `is_answerable`, `is_ambiguous` |
 | `meta_settings` | 3 | build setting | `as_of` (the date relative terms are anchored to), `dialect`, `built_at` |
 
 ### Metrics: formulas written once

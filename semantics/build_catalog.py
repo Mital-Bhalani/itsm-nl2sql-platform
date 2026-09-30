@@ -325,6 +325,15 @@ def window(start, end):
             f"AND {{time_column}} < {DIALECT.date_from(repr(end[0]), *end[1:])}")
 
 
+def quarter_start(offset=0):
+    """First day of the calendar quarter `offset` quarters from AS_OF's quarter (ISO date).
+    SQLite has no 'start of quarter' modifier (it silently returns NULL), so the quarter
+    windows below are written as literal dates computed here."""
+    today = date.fromisoformat(AS_OF)
+    index = today.year * 4 + (today.month - 1) // 3 + offset
+    return date(index // 4, index % 4 * 3 + 1, 1).isoformat()
+
+
 def term(term, kind, synonyms, definition, sql_hint=None, metric_name=None,
          related_columns=None, answerable=True, ambiguity=None):
     return {
@@ -448,6 +457,15 @@ GLOSSARY = [
     term("reopen rate", "metric", "bounce rate, re-open rate, reopen percentage",
          "Share of incidents reopened at least once. Use metric reopen_rate.",
          metric_name="reopen_rate", related_columns="incidents.reopened_count"),
+    term("SLA compliance", "value", "SLA compliance rate, compliance rate, SLA attainment, "
+                                    "SLA adherence, SLA success rate, SLA met rate",
+         "A finished incident that met its SLA target: the opposite of an SLA breach. The "
+         "compliance rate is 1 - sla_breach_rate, never the breach rate itself: report "
+         "ROUND(100.0 * AVG(CASE WHEN resolution minutes <= s.target_minutes THEN 1.0 ELSE 0.0 "
+         "END), 1) over finished incidents (85.0 means 85%). A count of compliant incidents is "
+         "the SUM of the same condition.",
+         f"i.status IN ('Resolved', 'Closed') AND NOT ({RESOLVED_LATE})",
+         related_columns="incidents.status, incidents.resolved_at, sla_targets.target_minutes"),
 
     # --- time windows (on {time_column}, anchored to AS_OF) ------------------
     term("as-of date", "concept", "today, now, current date",
@@ -474,6 +492,25 @@ GLOSSARY = [
     term("this year", "time", "year to date, YTD, current year",
          "The current calendar year up to the as-of date.",
          window((AS_OF, "start of year"), (AS_OF, "start of year", "+1 year"))),
+    term("last quarter", "time", "previous quarter, prior quarter",
+         "The previous calendar quarter (Jan-Mar, Apr-Jun, Jul-Sep, Oct-Dec). SQLite has no "
+         "'start of quarter' modifier: use the literal dates in the hint.",
+         window((quarter_start(-1),), (quarter_start(0),))),
+    term("this quarter", "time", "current quarter, quarter to date, QTD",
+         "The current calendar quarter up to the as-of date. SQLite has no 'start of quarter' "
+         "modifier: use the literal dates in the hint.",
+         window((quarter_start(0),), (quarter_start(1),))),
+
+    term("median", "concept", "middle value, 50th percentile, p50",
+         "The middle value of the sorted list, not the average. SQLite has no MEDIAN(): put the "
+         "values in a CTE v(x) with the question's filters, then SELECT AVG(x) FROM (SELECT x FROM v "
+         "ORDER BY x LIMIT 2 - (SELECT COUNT(*) FROM v) % 2 OFFSET (SELECT (COUNT(*) - 1) / 2 "
+         "FROM v)). Never take AVG of the raw values and call it the median."),
+    term("running total", "concept", "cumulative total, cumulative count, cumulative sum, "
+                                     "rolling total",
+         "A cumulative sum in date order. Count per period in a subquery (for example per month "
+         "with strftime('%Y-%m', i.opened_at)), then SUM(n) OVER (ORDER BY period) AS "
+         "running_total in the outer query. The plain per-period counts are not a running total."),
 
     # --- not answerable from this data ---------------------------------------
     # "assigned to" is deliberately NOT a synonym: "incidents assigned to Network" is a team
@@ -502,6 +539,22 @@ GLOSSARY = [
     term("change-caused incident", "concept", "caused by change, change-related incident",
          "An incident caused by a change. Incidents and changes are not linked.",
          answerable=False),
+    term("escalation", "concept", "escalated, escalate, escalations, escalated incident, "
+                                  "escalation level",
+         "Whether or when an incident was escalated. Not stored: there is no escalation "
+         "column or status.", answerable=False),
+    term("forecast", "concept", "predict, prediction, predicted, forecasting, projection, "
+                                "projected",
+         "A prediction of future ticket volume. The data holds past incidents and planned "
+         "changes only; the platform does not forecast.", answerable=False),
+    term("agent activity", "concept", "agent resolved, agent handled, agent closed, "
+                                      "resolved by each agent, resolved by agent, "
+                                      "resolved by an agent, handled by each agent, "
+                                      "handled by agent, agent performance, top agent, "
+                                      "best agent",
+         "What an individual agent resolved or handled. Not stored: incidents link to a team, "
+         "not to a person, and joining them through the team would only multiply rows. "
+         "Answer at team level instead.", answerable=False),
 ]
 # -----------------------------------------------------------------------------
 #  Table descriptions: table -> (description, grain)
@@ -797,6 +850,14 @@ LOOKUP_CHECKS = {
     "SLA targets": "SLA target",
     "last 30 days": "last 30 days",
     "assignees": "assignee",
+    "SLA compliance rate": "SLA compliance",
+    "escalated incidents": "escalation",
+    "predict": "forecast",
+    "last quarter": "last quarter",
+    "agent resolved": "agent activity",
+    "running totals": "running total",
+    "medians": "median",
+    "resolved by each agent": "agent activity",
 }
 
 

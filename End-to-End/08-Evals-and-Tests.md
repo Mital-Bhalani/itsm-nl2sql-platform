@@ -6,7 +6,7 @@ Two different kinds of checking:
 |---|---|---|
 | Question answered | *Does the AI write SQL that gives the right answer?* | *Does the code behave correctly?* |
 | Uses the real AI | Yes in live mode (costs API credit); no in self-test | Never (a fake model) |
-| Pass mark | Execution accuracy, e.g. 51/51 | Every test passes |
+| Pass mark | Execution accuracy, e.g. 80/80 | Every test passes |
 | Run with | `python evals/run_evals.py` or `/run-evals` | `python -B -m pytest tests -p no:cacheprovider` |
 
 ## Evals
@@ -15,12 +15,12 @@ Two different kinds of checking:
 
 | File | Role |
 |---|---|
-| `golden_set.yaml` | 51 questions for the default database, each with `reference_sql`, `expected` rows and scoring options |
+| `golden_set.yaml` | 80 questions for the default database, each with `reference_sql`, `expected` rows and scoring options |
 | `golden_set_large.yaml` | The same questions for the 50,000-incident database (the file names its database) |
 | `make_golden_set.py` | Generates both files: runs each reference SQL and stores the result as the expected rows, so expected values are never typed by hand |
 | `run_evals.py` | Asks the agent each question, runs its SQL and compares the rows with the expected rows |
 
-### The 51 questions
+### The 80 questions
 
 The first 15 (E01–E04, D01–D04, J01–J04, K01–K03) were written with the agent; 35 more were
 added on 2026-09-30 from the questions a service manager would actually ask of this data.
@@ -45,7 +45,7 @@ flowchart LR
 ```
 
 - **Self-test** (`--self-test`) scores the reference SQL instead of the AI. It costs nothing
-  and proves the golden set and scoring still agree with the database (51/51 expected).
+  and proves the golden set and scoring still agree with the database (80/80 expected).
 - **Live** calls the AI. `--provider` and `--model` score another model; `--json` prints a
   machine-readable report; `--golden` picks the file.
 - If the AI cannot be reached the run stops (exit code 2) instead of counting failures.
@@ -55,6 +55,25 @@ datasets on the third run of the 50-question set, after two runs at 47–48/50 t
 reference readings (J13, D07, K05) and showed one intermittent agent miss (K07 dropped `On Hold`
 from "open", since then a hard prompt rule). After the improvement round of the same day (51 questions, final prompt wording): 51/51 on both
 datasets in two consecutive runs each.
+
+Probe round (2026-10-01): 95 new questions with separately written reference SQL were run live
+and 18 returned a wrong or invented answer without any warning. The deterministic ones were
+fixed and 11 regression questions added (D14, D15, J15–J18, K13–K17), so the set is now 62
+questions. Live `gpt-4o-mini`: 61/62 on both datasets; the one miss is J16 ("incidents per
+team per agent": the numbers are right but the agent returns the two counts, not their ratio).
+
+A second probe round (78 more questions, same day) found 6 further misses. Together with the
+remaining misses of round one, 18 of them were added to the set as E13–E16, D16–D19, J19–J24 and
+K18–K21 **before any fix**, so the fixes can be measured. Baseline (live `gpt-4o-mini`): 63/80 on
+the default database and 65/80 on the large one; the 17 and 15 failures are the new cases plus
+J16, J17 and the intermittent J07 ("agents per group": it sometimes counts every user, not only
+role `agent`). Four probe failures are not in the set because they first need new not-answerable
+glossary terms (category, email address, weather, a person's name).
+
+Fixes for those cases (soft lint checks, an `EXPLAIN` syntax check and the glossary terms `median` and
+`running total`, see chapter 5) took the live score from 63/80 to 77/80 on the default database and
+from 65/80 to 77/80 on the large one. Still failing: J16, D19 and J23; J07, J01 and J15 fail now and
+then.
 
 Every run started from the Evals page is now stored (`logs/state.sqlite`) and the page shows
 recent runs and the questions that did not pass every time, so flakiness is visible without

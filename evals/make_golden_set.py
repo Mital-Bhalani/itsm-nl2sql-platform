@@ -4,7 +4,7 @@ Generate a golden eval set: every expected value comes from running its referenc
     python evals/make_golden_set.py            # db/tickets.sqlite -> evals/golden_set.yaml
     python evals/make_golden_set.py --db db/tickets_large.sqlite --out evals/golden_set_large.yaml
 
-The 51 questions and their reference SQL are defined once below (Q); only the expected rows
+The 80 questions and their reference SQL are defined once below (Q); only the expected rows
 depend on the database. Regenerate whenever db/seed.py or the database size changes.
 """
 import argparse
@@ -361,6 +361,206 @@ Q = [
          notes="Regression for a false refusal (2026-09-30): 'assigned to' used to be a synonym of the "
                "unanswerable term 'assignee', so this team question was refused before any model call. "
                "'Assigned to <team>' is a plain per-team count (all statuses)."),
+
+    # ---------------- regressions found by the 2026-10-01 probe ----------------
+    # Each of these returned a plausible but wrong number (or answered when it should have
+    # refused) before the SQL lint in agent/nl2sql.py and the matching glossary terms.
+    dict(id="D14", category="date_range", question="How many incidents were opened last quarter?",
+         sql="SELECT COUNT(*) AS incidents FROM incidents i "
+             "WHERE i.opened_at >= '2026-04-01' AND i.opened_at < '2026-07-01'",
+         notes="As-of 2026-09-28 is in Q3, so last quarter = April-June 2026. SQLite has no 'start of "
+               "quarter' modifier; the agent used it, the date became NULL and the answer was a silent 0."),
+    dict(id="D15", category="date_range", question="How many incidents were opened this quarter?",
+         sql="SELECT COUNT(*) AS incidents FROM incidents i "
+             "WHERE i.opened_at >= '2026-07-01' AND i.opened_at < '2026-10-01'",
+         notes="This quarter = July-September 2026. Same invalid-modifier failure as D14."),
+    dict(id="J15", category="multi_table_join",
+         question="How many incidents and how many changes does each team have?",
+         sql="SELECT g.name AS team, "
+             "(SELECT COUNT(*) FROM incidents i WHERE i.assignment_group_id = g.id) AS incidents, "
+             "(SELECT COUNT(*) FROM changes c WHERE c.assignment_group_id = g.id) AS changes "
+             "FROM assignment_groups g",
+         notes="Join fan-out trap: joining incidents and changes to the team in one query repeats every "
+               "incident once per change (Service Desk showed 696 and 696 instead of 174 and 4)."),
+    dict(id="J16", category="multi_table_join", question="How many incidents does each team have per agent?",
+         sql="SELECT g.name AS team, 1.0 * (SELECT COUNT(*) FROM incidents i WHERE i.assignment_group_id = g.id) "
+             "/ (SELECT COUNT(*) FROM users u WHERE u.assignment_group_id = g.id AND u.role = 'agent') "
+             "AS incidents_per_agent FROM assignment_groups g",
+         tolerance=0.01, ambiguous=True,
+         alternatives=[dict(reading="head count = every user in the team, not only role agent",
+                            sql="SELECT g.name AS team, 1.0 * (SELECT COUNT(*) FROM incidents i "
+                                "WHERE i.assignment_group_id = g.id) / (SELECT COUNT(*) FROM users u "
+                                "WHERE u.assignment_group_id = g.id) AS incidents_per_agent "
+                                "FROM assignment_groups g")],
+         notes="Fan-out trap with users: the agent returned incident and agent counts of 1914 and 1914."),
+    dict(id="J17", category="multi_table_join", question="Which team has the most incidents per agent?",
+         sql="SELECT g.name AS team FROM assignment_groups g ORDER BY 1.0 * (SELECT COUNT(*) FROM incidents i "
+             "WHERE i.assignment_group_id = g.id) / (SELECT COUNT(*) FROM users u "
+             "WHERE u.assignment_group_id = g.id AND u.role = 'agent') DESC LIMIT 1",
+         ambiguous=True,
+         alternatives=[dict(reading="head count = every user in the team, not only role agent",
+                            sql="SELECT g.name AS team FROM assignment_groups g ORDER BY 1.0 * (SELECT COUNT(*) "
+                                "FROM incidents i WHERE i.assignment_group_id = g.id) / (SELECT COUNT(*) "
+                                "FROM users u WHERE u.assignment_group_id = g.id) DESC LIMIT 1")],
+         notes="Only the team name is compared. The fanned-out query gave every team a ratio of 1.0."),
+    dict(id="J18", category="multi_table_join",
+         question="How many incidents were opened each month by the Network team?",
+         sql="SELECT strftime('%Y-%m', i.opened_at) AS month, COUNT(*) AS incidents FROM incidents i "
+             "JOIN assignment_groups g ON g.id = i.assignment_group_id WHERE g.name = 'Network' "
+             "GROUP BY month",
+         alternatives=[dict(reading="month as two digits",
+                            sql="SELECT strftime('%m', i.opened_at) AS month, COUNT(*) AS incidents "
+                                "FROM incidents i JOIN assignment_groups g ON g.id = i.assignment_group_id "
+                                "WHERE g.name = 'Network' GROUP BY month")],
+         notes="The team filter was put in a LEFT JOIN's ON clause, which removes no incident, so the "
+               "answer showed all teams' monthly counts as Network's."),
+    dict(id="K13", category="edge_case", question="What is the SLA compliance rate?",
+         sql=f"SELECT ROUND(100.0 * AVG(CASE WHEN {BREACHED} THEN 0.0 ELSE 1.0 END), 1) AS compliance_pct "
+             f"FROM incidents i JOIN sla_targets s ON s.priority = i.priority WHERE {FINISHED}",
+         tolerance=0.05,
+         alternatives=[dict(reading="ratio 0-1",
+                            sql=f"SELECT ROUND(AVG(CASE WHEN {BREACHED} THEN 0.0 ELSE 1.0 END), 3) AS compliance "
+                                f"FROM incidents i JOIN sla_targets s ON s.priority = i.priority "
+                                f"WHERE {FINISHED}")],
+         notes="Compliance = 1 - breach rate = 85.0% (0.85 also accepted). The agent returned the breach "
+               "rate, 15.0, under the name sla_compliance_rate."),
+    dict(id="K14", category="edge_case", question="Which agent resolved the most incidents?",
+         refusal=True,
+         notes="Not answerable: incidents link to a team, not a person (glossary 'agent activity'). "
+               "The agent used to join users to incidents through the team and name a user id."),
+    dict(id="K15", category="edge_case", question="How many incidents were escalated?",
+         refusal=True,
+         notes="Not answerable: there is no escalation column or status (glossary 'escalation'). "
+               "The agent used to invent status = 'Escalated' and answer 0."),
+    dict(id="K16", category="edge_case", question="Predict how many incidents will be opened next month",
+         refusal=True,
+         notes="Not answerable: the platform does not forecast (glossary 'forecast'). The agent used to "
+               "count future rows and label the 0 'predicted_incidents'."),
+    dict(id="K17", category="edge_case", question="How many incidents were resolved by each agent?",
+         refusal=True,
+         notes="Not answerable: same as K14. The agent used to return 3100 'resolved incidents' from a "
+               "fanned-out join of incidents and users."),
+
+    # ---------------- second probe round (2026-10-01): failures still open ----------------
+    # Added before the fixes so they are measured. Four probe failures are not here because they
+    # need new not-answerable glossary terms first (category, email address, weather, "John").
+    dict(id="E13", category="easy_lookup", question="Show the 5 most recently opened incidents",
+         sql="SELECT i.id FROM incidents i ORDER BY i.opened_at DESC, i.id DESC LIMIT 5",
+         order_matters=True,
+         notes="The agent added an unrequested open-status filter. Ids only are compared, in order."),
+    dict(id="E14", category="easy_lookup", question="Show the oldest open incident",
+         sql=f"SELECT i.id FROM incidents i WHERE {OPEN} ORDER BY i.opened_at ASC, i.id ASC LIMIT 1",
+         notes="The agent returned MIN(opened_at), a date, not the incident."),
+    dict(id="E15", category="easy_lookup", question="List all P1 incidents that are still open",
+         sql=f"SELECT i.id FROM incidents i WHERE i.priority = 1 AND {OPEN}",
+         notes="'List' asks for the rows; the agent returned a count. 1 row at the default size, 252 on the "
+               "large set."),
+    dict(id="E16", category="easy_lookup", question="Show incidents reopened more than twice",
+         sql="SELECT i.id FROM incidents i WHERE i.reopened_count > 2",
+         notes="No incident was reopened more than twice at either size, so the right answer is an empty "
+               "list. The agent returned a one-row count of 0 instead of a list."),
+    dict(id="D16", category="date_range", question="How many changes start on a weekend?",
+         sql="SELECT COUNT(*) AS weekend_changes FROM changes c WHERE strftime('%w', c.planned_start) IN ('0', '6')",
+         notes="Sunday = 0, Saturday = 6. The agent dropped cancelled changes without being asked (27, not 28)."),
+    dict(id="D17", category="date_range", question="How many changes were planned last month?",
+         sql="SELECT COUNT(*) AS changes FROM changes c "
+             "WHERE c.planned_start >= '2026-08-01' AND c.planned_start < '2026-09-01'",
+         ambiguous=True,
+         alternatives=[dict(reading="active changes only (cancelled ones left out)",
+                            sql="SELECT COUNT(*) AS changes FROM changes c WHERE c.status <> 'Cancelled' "
+                                "AND c.planned_start >= '2026-08-01' AND c.planned_start < '2026-09-01'")],
+         notes="Last month = August 2026 on planned_start. Both readings are accepted; the agent chose the "
+               "second without saying so (19 vs 20)."),
+    dict(id="D18", category="date_range", question="How many incidents were opened today?",
+         sql="SELECT COUNT(*) AS incidents FROM incidents i "
+             "WHERE i.opened_at >= '2026-09-28' AND i.opened_at < '2026-09-29'",
+         notes="Today is the as-of date 2026-09-28 and the data ends on 09-27, so the answer is 0. The agent "
+               "once wrote a syntax error (a stray '+1 day' argument outside date()); ask() repairs it, "
+               "translate() does not, and the evals call translate()."),
+    dict(id="D19", category="date_range", question="How many incidents were opened between 9am and 5pm?",
+         sql="SELECT COUNT(*) AS incidents FROM incidents i "
+             "WHERE CAST(strftime('%H', i.opened_at) AS INTEGER) >= 9 "
+             "AND CAST(strftime('%H', i.opened_at) AS INTEGER) < 17",
+         ambiguous=True,
+         alternatives=[dict(reading="5pm inclusive (any time up to 17:59)",
+                            sql="SELECT COUNT(*) AS incidents FROM incidents i "
+                                "WHERE CAST(strftime('%H', i.opened_at) AS INTEGER) BETWEEN 9 AND 17")],
+         notes="A time of day across all dates. The agent applied it to the as-of day only and answered 0."),
+    dict(id="J19", category="multi_table_join", question="How many P1 incidents does each team have?",
+         sql="SELECT g.name AS team, COUNT(i.id) AS p1_incidents FROM assignment_groups g "
+             "LEFT JOIN incidents i ON i.assignment_group_id = g.id AND i.priority = 1 GROUP BY g.id",
+         notes="Every status counts. The agent added an open-status filter to 'P1 incidents' when asked which "
+               "team has the most (Service Desk, 1 open, instead of a three-way tie at 4)."),
+    dict(id="J20", category="multi_table_join", question="What is the average planned duration of a change in hours?",
+         sql="SELECT AVG((julianday(c.planned_end) - julianday(c.planned_start)) * 24) AS avg_hours FROM changes c",
+         tolerance=0.01,
+         notes="All changes, cancelled included. The agent dropped cancelled ones: 2.492 h instead of 2.455 h."),
+    dict(id="J21", category="multi_table_join", question="How many teams have more than 10 open incidents?",
+         sql=f"SELECT COUNT(*) AS teams FROM (SELECT i.assignment_group_id FROM incidents i WHERE {OPEN} "
+             f"GROUP BY i.assignment_group_id HAVING COUNT(*) > 10)",
+         notes="One number. The agent returned one row per team (COUNT(*) per group) instead of counting teams. "
+               "1 at the default size, 5 on the large set."),
+    dict(id="J22", category="multi_table_join", question="Compare SLA breach counts between P1 and P2",
+         sql=f"SELECT i.priority, COUNT(*) AS breaches FROM incidents i "
+             f"JOIN sla_targets s ON s.priority = i.priority WHERE {FINISHED} AND {BREACHED} "
+             f"AND i.priority IN (1, 2) GROUP BY i.priority",
+         ambiguous=True,
+         alternatives=[dict(reading="one row, one column per priority",
+                            sql=f"SELECT SUM(CASE WHEN i.priority = 1 THEN 1 ELSE 0 END) AS p1_breaches, "
+                                f"SUM(CASE WHEN i.priority = 2 THEN 1 ELSE 0 END) AS p2_breaches FROM incidents i "
+                                f"JOIN sla_targets s ON s.priority = i.priority WHERE {FINISHED} AND {BREACHED} "
+                                f"AND i.priority IN (1, 2)")],
+         notes="Two layouts of the same numbers are accepted."),
+    dict(id="J23", category="multi_table_join",
+         question="Which team has the highest percentage of P1 incidents?",
+         sql="SELECT g.name AS team FROM incidents i JOIN assignment_groups g ON g.id = i.assignment_group_id "
+             "GROUP BY g.id ORDER BY 1.0 * SUM(i.priority = 1) / COUNT(*) DESC LIMIT 1",
+         notes="Percentage of the team's own incidents that are P1. The probe wording 'highest share of P1 "
+               "incidents' was read by the agent as the team's share of all P1 incidents instead."),
+    dict(id="J24", category="multi_table_join",
+         question="How many incidents breached SLA in each priority last month?",
+         sql=f"SELECT i.priority, COUNT(*) AS breaches FROM incidents i "
+             f"JOIN sla_targets s ON s.priority = i.priority WHERE {FINISHED} AND {BREACHED} AND {LAST_MONTH} "
+             f"GROUP BY i.priority",
+         ambiguous=True,
+         alternatives=[dict(reading="every priority listed, zero breaches included",
+                            sql=f"SELECT i.priority, SUM(CASE WHEN {BREACHED} THEN 1 ELSE 0 END) AS breaches "
+                                f"FROM incidents i JOIN sla_targets s ON s.priority = i.priority "
+                                f"WHERE {FINISHED} AND {LAST_MONTH} GROUP BY i.priority"),
+                       dict(reading="breach counted in the month the incident was resolved (resolved_at)",
+                            sql=f"SELECT i.priority, SUM(CASE WHEN {BREACHED} THEN 1 ELSE 0 END) AS breaches "
+                                f"FROM incidents i JOIN sla_targets s ON s.priority = i.priority "
+                                f"WHERE {FINISHED} AND i.resolved_at >= '2026-08-01' "
+                                f"AND i.resolved_at < '2026-09-01' GROUP BY i.priority")],
+         notes="Priorities with no breach may be left out or shown as 0; both are accepted. The catalog "
+               "filters a breach window on opened_at; filtering on resolved_at is also accepted (as for "
+               "J13), because it differs only on the large set."),
+    dict(id="K18", category="edge_case", question="What is the median resolution time in hours?",
+         sql="SELECT AVG(h) AS median_hours FROM (SELECT (julianday(resolved_at) - julianday(opened_at)) * 24 AS h "
+             "FROM incidents WHERE resolved_at IS NOT NULL ORDER BY h "
+             "LIMIT 2 - (SELECT COUNT(*) FROM incidents WHERE resolved_at IS NOT NULL) % 2 "
+             "OFFSET (SELECT (COUNT(*) - 1) / 2 FROM incidents WHERE resolved_at IS NOT NULL))",
+         tolerance=0.05,
+         notes="Median, not mean: 31.6 h (the mean is 47.1 h). The agent computed AVG and called it the median."),
+    dict(id="K19", category="edge_case", question="What is the running total of incidents opened by month?",
+         sql="SELECT month, SUM(n) OVER (ORDER BY month) AS running_total FROM "
+             "(SELECT strftime('%Y-%m', opened_at) AS month, COUNT(*) AS n FROM incidents GROUP BY month)",
+         alternatives=[dict(reading="month as two digits",
+                            sql="SELECT month, SUM(n) OVER (ORDER BY month) AS running_total FROM "
+                                "(SELECT strftime('%m', opened_at) AS month, COUNT(*) AS n FROM incidents "
+                                "GROUP BY month)")],
+         notes="Cumulative: 68, 143, 216, 313, 383, 500. The agent returned the plain monthly counts."),
+    dict(id="K20", category="edge_case", question="What is the average number of incidents per month?",
+         sql="SELECT AVG(n) AS avg_per_month FROM (SELECT COUNT(*) AS n FROM incidents "
+             "GROUP BY strftime('%Y-%m', opened_at))",
+         tolerance=0.01,
+         notes="Average over the 6 months that have data (Apr-Sep 2026): 83.3. The agent divided by a "
+               "hard-coded 12 (41.7)."),
+    dict(id="K21", category="edge_case", question="What is the average number of changes per team?",
+         sql="SELECT 1.0 * COUNT(*) / (SELECT COUNT(*) FROM assignment_groups) AS avg_changes_per_team FROM changes",
+         tolerance=0.01,
+         notes="One number: 100 changes / 5 teams = 20.0. The agent returned each team's own count labelled "
+               "as the average."),
 ]
 
 

@@ -59,11 +59,11 @@ column lists only what that day introduced.
 |---|---|---|---|
 | 1 | ITSM database (5 tables), deterministic synthetic data, naive "question → SQL" spike | SQLite (STRICT tables), Python standard library, OpenAI SDK | ✅ Done |
 | 2 | Semantic layer: `meta_*` catalog of columns, metrics, glossary, tables and joins, with self-checks | SQL fragments stored in SQLite (`meta_*` tables) | ✅ Done |
-| 3 | Evaluation harness: 51-question golden set, scoring, self-test, 50,000-incident large dataset | PyYAML | ✅ Done |
-| 4 | NL2SQL agent: catalog context, guardrails (read-only, SELECT-only, auto-LIMIT, PII block, timeout), one SQL repair, plain-English answers with follow-ups | OpenAI gpt-4o-mini, SQLite authorizer and progress handler | ✅ Done, 51/51 live |
+| 3 | Evaluation harness: 80-question golden set, scoring, self-test, 50,000-incident large dataset | PyYAML | ✅ Done |
+| 4 | NL2SQL agent: catalog context, guardrails (read-only, SELECT-only, auto-LIMIT, PII block, timeout), one SQL repair, plain-English answers with follow-ups | OpenAI gpt-4o-mini, SQLite authorizer and progress handler | ✅ Done, 77/80 live (3 open failures tracked in the golden set) |
 | 5 | Multi-model: OpenAI and Anthropic Claude, switchable per question, with fallback | Anthropic SDK (Claude Opus 5.5), python-dotenv | ✅ Done |
 | 6 | HTTP API: ask, KPIs, table explorer, incidents, catalog, evals, SQL console, UI-vs-database check; API key, rate limit, audit log | FastAPI, Uvicorn, Pydantic | ✅ Done |
-| 7 | React UI: Ask, Dashboard, Explorer, Incident, Catalog, Evals, Data check, served by the API at `/web/`; automated test suite (83 pytest + 22 Playwright) | React 19, TypeScript, Vite, Tailwind CSS 4, TanStack Query, Recharts, pytest | ✅ Done |
+| 7 | React UI: Ask, Dashboard, Explorer, Incident, Catalog, Evals, Data check, served by the API at `/web/`; automated test suite (130 pytest + 22 Playwright) | React 19, TypeScript, Vite, Tailwind CSS 4, TanStack Query, Recharts, pytest | ✅ Done |
 
 ## Quick start
 
@@ -151,7 +151,7 @@ with the same data (fixed seed 42, "today" fixed at 28 Sep 2026), and `build_cat
 be run after every seed because seeding replaces the whole file. To check a fresh setup:
 
 ```bash
-python evals/run_evals.py --self-test    # expects 51/51, no API key needed
+python evals/run_evals.py --self-test    # expects 80/80, no API key needed
 ```
 
 ## Project structure

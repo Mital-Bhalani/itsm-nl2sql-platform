@@ -23,7 +23,12 @@ flowchart TD
     M1 --> X["extract_sql()<br/>SQL + '-- assumption:' line"]
     X --> G{"guard_sql()<br/>one SELECT, no write words"}
     G -- fails --> UNS["unsafe: blocked"]
-    G -- ok --> RUN["run_sql()<br/>read-only, authorizer, limits"]
+    G -- ok --> L{"lint_sql() and lint_question()<br/>wrong or off-question SQL?"}
+    L -- problem --> LR["one repair call<br/>(problem sent back)"]
+    LR --> L2{"lint again"}
+    L2 -- still wrong --> UNS
+    L2 -- ok --> RUN
+    L -- ok --> RUN["run_sql()<br/>read-only, authorizer, limits"]
     RUN -- SQLite error --> REP["one repair call<br/>(error + failed SQL sent back)"]
     REP --> G2{"guard + run again"}
     G2 -- fails --> ERR["error returned"]
@@ -45,7 +50,9 @@ flowchart TD
 | `with_history(question, history)` | The user message: the last 3 `{question, sql}` turns of the conversation under "CONVERSATION SO FAR", then the new question. History goes in the user message so the system prompt (the catalog) stays identical and the provider's prompt cache hits (measured: about 4,200 of 4,400 prompt tokens cached on OpenAI) |
 | `extract_sql(text)` | Pulls the SQL out of the reply's code block and the `-- assumption:` line |
 | `guard_sql(sql)` | Rejects empty SQL, more than one statement, anything not starting with SELECT/WITH, and write/admin keywords (strings are ignored when checking); appends `LIMIT 1000` if missing |
-| `translate(question, …)` | Terms → refusal check → context → AI → SQL (no execution). Returns `{terms, refusal, sql, assumption, unsafe, provider, model, tokens…}` |
+| `lint_sql(conn, sql)` | Finds SQL that runs but is certainly wrong: a date modifier SQLite does not know (for example `'start of quarter'`; SQLite returns NULL and a count silently becomes 0), two child tables (incidents, changes, users) joined in one aggregate query (every count is multiplied), and a filter on the parent table inside a `LEFT JOIN ... ON` (it removes no rows). Reads the join paths from `meta_joins`, so nothing is hard-coded |
+| `lint_question(question, sql, resolved)` | The soft checks. They compare the SQL with the question and send it back once, but never block: an open-status filter nobody asked for ("P1 incidents"; "opened" is a date, not the status open), `status <> 'Cancelled'` nobody asked for, "show/list" answered with one aggregate value, "how many teams…" answered with one row per team, and "average number of X per Y" returned per group or divided by a fixed 12. A glossary term whose hint contains the filter justifies it ("overdue" justifies the open statuses). Follow-up questions skip these checks |
+| `translate(question, …)` | Terms → refusal check → context → AI → SQL → lint (one repair call if it fails; blocked if still wrong). No execution. Returns `{terms, refusal, sql, assumption, unsafe, lint, provider, model, tokens…}` |
 | `summarise(question, result)` | Second AI call with the question and up to 50 rows; expects JSON `{answer, followups}` |
 | `parse_answer(text)` | Reads that JSON; falls back to the plain text if it is not JSON |
 | `_fallback_answer()` | Fixed sentence ("The answer is 12.", "No matching records were found.") if the answer call fails |

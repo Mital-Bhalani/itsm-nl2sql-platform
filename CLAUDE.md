@@ -30,7 +30,7 @@ python evals/run_evals.py           # score the agent on evals/golden_set.yaml (
 python agent/naive_spike.py         # Day 1 naive spike (no context; shows why the agent is needed)
 python run_app.py                   # API :8000 (/docs), React UI at :8000/web/, Ctrl+C stops it
 cd web && npm run build            # React UI -> web/dist, served by the API at /web/ (npm run dev: :5173)
-python -B -m pytest tests -p no:cacheprovider   # 83 tests, no API key, temp DB outside repo
+python -B -m pytest tests -p no:cacheprovider   # 130 tests, no API key, temp DB outside repo
 cd web && npm run e2e              # 22 Playwright checks in Edge; starts its own API on :8010 (E2E_PORT=8000 reuses a running one)
 ```
 
@@ -89,11 +89,11 @@ read-only · **SELECT-only** · auto-LIMIT · **no raw PII in output** (`users.n
 | `db/` | 1 | **done**: `schema.sql`, `seed.py`, generated `tickets.sqlite` (gitignored `*.sqlite`); `dialect.py` (SQLite/PostgreSQL date expressions) |
 | `agent/` | 1 → 2–3 | `naive_spike.py`, **`nl2sql.py`** (agent: `translate`, `ask`), **`llm.py`** (providers) |
 | `semantics/` | 2 | **done**: `build_catalog.py` fills all five meta_* tables |
-| `evals/` | 2 | **done**: `golden_set.yaml` (51 questions) + `run_evals.py` + `make_golden_set.py` |
+| `evals/` | 2 | **done**: `golden_set.yaml` (80 questions) + `run_evals.py` + `make_golden_set.py` |
 | `api/` | 3 | **done**: FastAPI (`main.py`, `services.py`, `schemas.py`, `config.py`, `state.py` = SQLite store for rate limits and eval jobs) |
 | `web/` | 4 | **done**: React 19 + TS + Tailwind 4 + TanStack Query + Recharts; built to `web/dist`, served at `/web/` |
 | `End-to-End/` | — | **done**: 11-chapter project guide (hierarchy, every script/component, request lifecycle, security, operations); update it when code changes |
-| `tests/` | — | **done**: pytest, 83 tests (guardrails, providers, dialect, API with a fake model, state store, security attacks) + `web/e2e` Playwright (22) |
+| `tests/` | — | **done**: pytest, 130 tests (guardrails, SQL lint, providers, dialect, API with a fake model, state store, security attacks) + `web/e2e` Playwright (22) |
 
 `scripts/`, `docs/` and `spike/` from the original plan were not created: the data generator
 lives in `db/seed.py` and the spike in `agent/naive_spike.py`. There is no `db/build_db.py`.
@@ -184,7 +184,7 @@ byte-identically).
 |---|---|---|
 | `meta_columns` | 23 | type, nullability, keys, FK, allowed values (read from schema.sql) + drafted description, example, `is_pii`, `is_ambiguous`/note, `synonyms` |
 | `meta_metrics` | 3 | `mttr` (minutes), `sla_breach_rate`, `reopen_rate` (ratio 0–1) as reusable SQL fragments |
-| `meta_glossary` | 43 | business terms → entity / value / metric / time / concept, with `sql_hint` |
+| `meta_glossary` | 51 | business terms → entity / value / metric / time / concept, with `sql_hint` |
 | `meta_tables` | 5 | description and grain per data table (`TABLE_DRAFTS`) |
 | `meta_joins` | 4 | one row per schema foreign key, with cardinality and pitfalls (`JOINS`); build fails if they drift |
 
@@ -217,7 +217,21 @@ byte-identically).
 3. Prompt = rules + all meta_* content (tables, columns, joins, metrics, glossary) + the terms
    found; nothing about the schema is hard-coded. Model `OPENAI_MODEL` (default
    `gpt-4o-mini`), temperature 0; ambiguous terms → `-- assumption:` line.
-4. Guardrails: one SELECT/WITH statement, write/admin keywords rejected, DB opened read-only,
+4. **SQL lint** (`lint_sql`, added 2026-10-01): SQL that runs but is certainly wrong is sent back to
+   the model once, then blocked (`unsafe`) if still wrong: an unknown date modifier (SQLite returns
+   NULL for `'start of quarter'`, so a count silently became 0), two child tables (incidents,
+   changes, users) joined in one aggregate query (join fan-out multiplies every count), and a
+   filter on the parent table inside a `LEFT JOIN ... ON` (removes no rows). Join paths come from
+   `meta_joins`; the golden-set reference SQL must lint clean (a test checks it). Also caught before
+   running: SQL that SQLite rejects (`EXPLAIN`), so the repair call now happens inside `translate()`.
+   **Soft checks** (`lint_question`, same 2026-10-01 round) compare the SQL with the question and
+   trigger one repair call but never block: an open-status filter nobody asked for ("P1 incidents",
+   "recently opened" is a date, not the status open), `status <> 'Cancelled'` nobody asked for,
+   "show/list" answered with one aggregate (MIN/COUNT instead of rows), "how many teams..." answered
+   with one row per team, "average number of X per Y" returned per group or divided by a fixed 12.
+   Follow-up questions skip the soft checks. Glossary terms `median` and `running total` carry the SQL
+   recipe (SQLite has no MEDIAN).
+5. Guardrails: one SELECT/WITH statement, write/admin keywords rejected, DB opened read-only,
    `LIMIT 1000` appended if missing, `users.name` blocked by a SQLite authorizer (also via
    `SELECT *`). API failures raise `AgentAPIError`.
 
@@ -437,6 +451,44 @@ for a conflicting rule in `build_context`. Catalog wording generalises — fix n
 the **whole** set, and repeat runs
 (the model is not fully deterministic even at temperature 0). 15/15 on 15 questions written
 alongside these fixes is not proof of general accuracy; grow the golden set (open item 3).
+
+**Probe round (2026-10-01): 95 new questions with separate reference SQL, run live (gpt-4o-mini).**
+66 passed; 18 gave a wrong or invented answer with no warning. Fixed deterministically (no prompt
+rule added): invalid date modifier (`SQL lint`; new glossary terms `last quarter`, `this quarter`
+with literal dates), join fan-out and parent-filter-in-LEFT-JOIN (`SQL lint` + one repair call),
+inverted "SLA compliance rate" (new glossary term `SLA compliance`: 85.0, not the 15.0 breach rate),
+and questions the data cannot answer that used to be answered (new not-answerable terms
+`escalation`, `forecast`, `agent activity`). Eleven regression questions added (D14, D15, J15-J18,
+K13-K17); the set is 62. Live: **61/62 on both sets**; the miss is J16 ("incidents per team per
+agent" returns the two counts, not the ratio; the numbers are correct). A glossary term `per agent`
+was tried for J16 and made the model write invalid SQL (HAVING on a non-aggregate query), so it
+was reverted. Still open from the probe (real but rarer, left alone): median is computed as a
+mean (A01), no running totals (J20), invented filters or shapes (V14 adds an open-only filter,
+O01-O03), "last 7 days" covers 6 days (T03), cancelled changes dropped without being asked
+(T13, J10), `HAVING` counts returned per team instead of one number (J16 probe variant).
+
+**Second probe round (2026-10-01): 78 more questions** (changes table, phrasing, typos, French and
+German, follow-ups with history, hostile input): 72 passed. All 10 hostile probes (SQL injection,
+prompt and key extraction, PII, writes) and the follow-ups passed. Misses: invented filters
+(V14, O01, C06/T13/J10: open-only or cancelled-excluded nobody asked for), wrong shape (O02 returns a
+date, O03/P25 a count instead of a list, J16 one row per team), wrong calculation (A01 median = mean,
+J20 running total, P18 divides by a hard-coded 12, C04 per-team counts labelled an average).
+**18 of them were added to the golden set before any fix** (E13-E16, D16-D19, J19-J24, K18-K21), so
+the set is 80 questions. Live baseline: **63/80 default, 65/80 large**; the failing ones are these
+new cases plus J16, J17 and the intermittent J07 ("agents per group" sometimes counts every user, not
+only role agent). Not in the set because they need new not-answerable terms first: "which
+category", "email address of the admin", "weather", "assigned to John". D18 fails on
+translate() only (ask() repairs the syntax error), and the evals call translate().
+
+**Fixes for the second-round cases (2026-10-01), measured on the 80-question set:** live gpt-4o-mini
+went from **63/80 to 77/80 on the default database and 65/80 to 77/80 on the large one** (77 and 76 on the runs
+before the J24 alternative, 77 and 77 after it; one run each, so repeat before trusting). Fixed by the soft lint and the two glossary terms above: E13-E16, D16,
+D18, J19-J21, J24 (opened_at/resolved_at window accepted as an alternative, as for J13), K18-K21.
+Still failing: **J16** ("incidents per team per agent": returns both counts, not the ratio; a
+`per agent` glossary term made it worse, see above), **D19** ("between 9am and 5pm" is applied to
+the as-of day only) and **J23** ("highest percentage of P1 incidents" is read as the team's share of
+all P1 incidents). Intermittent, each passing in other runs: J07 (counts every user, not only role
+agent), J01 (once invented the window `date('2026-08-28')`), J15.
 
 ## Open items / next steps
 

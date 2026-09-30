@@ -18,6 +18,8 @@ Guardrails:
     * questions that use a term the data cannot answer (e.g. "assignee") are refused
       before any API call
     * exactly one statement, SELECT or WITH only; write/admin keywords are rejected
+    * valid SQL that is certainly wrong (an unknown date modifier, a join that multiplies rows) is
+      sent back to the model once, then blocked if it is still wrong (lint_sql)
     * the database is opened read-only
     * LIMIT 1000 is appended when the query has no LIMIT
     * a query running longer than 5 seconds is interrupted
@@ -306,6 +308,255 @@ def guard_sql(sql):
 
 
 # -----------------------------------------------------------------------------
+#  SQL lint: mistakes that still run and return a plausible, wrong number
+# -----------------------------------------------------------------------------
+# guard_sql stops unsafe SQL and SQLite stops invalid SQL. These checks catch valid SQL that is
+# certainly wrong: an unknown date modifier makes SQLite return NULL (every comparison then
+# fails and a count silently becomes 0), and joining two child tables of one parent multiplies
+# rows. A failed check sends the problem back to the model once (see translate).
+DATE_FUNCTIONS = {"date": 1, "datetime": 1, "time": 1, "julianday": 1, "unixepoch": 1,
+                  "strftime": 2}  # name -> index of the first modifier argument
+VALID_MODIFIER = re.compile(
+    r"[+-]?\d+(?:\.\d+)?\s+(?:second|minute|hour|day|month|year)s?"
+    r"|start\s+of\s+(?:day|month|year)|weekday\s+[0-6]"
+    r"|unixepoch|julianday|auto|localtime|utc|subsec|subsecond|ceiling|floor"
+    r"|[+-]\d{2}:\d{2}(?::\d{2}(?:\.\d+)?)?", re.I)
+SQL_WORDS = {"left", "right", "inner", "outer", "cross", "join", "on", "where", "group",
+             "order", "having", "limit", "union", "using", "natural", "select"}
+AGGREGATE = re.compile(r"\b(count|sum|avg)\s*\(", re.I)
+LEFT_JOIN = re.compile(
+    r"\bleft\s+(?:outer\s+)?join\s+([A-Za-z_]\w*)(?:\s+(?:as\s+)?([A-Za-z_]\w*))?\s+on\s+"
+    r"(.*?)(?=\bleft\b|\binner\b|\bjoin\b|\bwhere\b|\bgroup\b|\border\b|\bhaving\b|\blimit\b|$)",
+    re.I | re.S)
+
+
+def _skip_string(text, i):
+    """Index just after the quoted literal that starts at text[i] (a doubled '' is an escape)."""
+    i += 1
+    while i < len(text):
+        if text[i] == "'":
+            if text[i + 1:i + 2] == "'":
+                i += 2
+                continue
+            return i + 1
+        i += 1
+    return len(text)
+
+
+def _call_args(text, open_idx):
+    """Top-level arguments of the call whose '(' is at text[open_idx]."""
+    args, depth, i, start = [], 1, open_idx + 1, open_idx + 1
+    while i < len(text):
+        ch = text[i]
+        if ch == "'":
+            i = _skip_string(text, i)
+            continue
+        if ch == "(":
+            depth += 1
+        elif ch == ")":
+            depth -= 1
+            if depth == 0:
+                args.append(text[start:i])
+                break
+        elif ch == "," and depth == 1:
+            args.append(text[start:i])
+            start = i + 1
+        i += 1
+    return args
+
+
+def _select_scopes(sql):
+    """Every SELECT in the query as its own text, with nested sub-SELECTs blanked out as (?)."""
+    scopes = []
+
+    def blank(text):
+        out, i = [], 0
+        while i < len(text):
+            ch = text[i]
+            if ch == "'":
+                j = _skip_string(text, i)
+                out.append(text[i:j])
+                i = j
+            elif ch == "(":
+                depth, j = 1, i + 1
+                while j < len(text) and depth:
+                    if text[j] == "'":
+                        j = _skip_string(text, j)
+                        continue
+                    depth += (text[j] == "(") - (text[j] == ")")
+                    j += 1
+                inner = text[i + 1:j - 1]
+                if re.match(r"\s*(select|with)\b", inner, re.I):
+                    scopes.append(blank(inner))
+                    out.append("(?)")
+                else:
+                    out.append("(" + blank(inner) + ")")
+                i = j
+            else:
+                out.append(ch)
+                i += 1
+        return "".join(out)
+
+    scopes.append(blank(sql))
+    return scopes
+
+
+def _scope_tables(scope):
+    """[(table, alias)] for every FROM / JOIN in one SELECT scope."""
+    found = []
+    for m in re.finditer(r"\b(?:from|join)\s+([A-Za-z_]\w*)(?:\s+(?:as\s+)?([A-Za-z_]\w*))?",
+                         scope, re.I):
+        alias = (m.group(2) or "").lower()
+        found.append((m.group(1).lower(), "" if alias in SQL_WORDS else alias))
+    return [(table, alias or table) for table, alias in found]
+
+
+def bad_date_modifiers(sql):
+    """Literal date modifiers SQLite does not know, e.g. 'start of quarter' (it returns NULL)."""
+    bad = []
+    for m in re.finditer(r"\b(date|datetime|time|julianday|unixepoch|strftime)\s*\(", sql, re.I):
+        for arg in _call_args(sql, m.end() - 1)[DATE_FUNCTIONS[m.group(1).lower()]:]:
+            literal = re.fullmatch(r"\s*'((?:[^']|'')*)'\s*", arg)
+            if literal and not VALID_MODIFIER.fullmatch(literal.group(1).strip()):
+                bad.append(literal.group(1))
+    return bad
+
+
+def lint_sql(conn, sql):
+    """Problems that make the SQL return a wrong answer without raising an error (may be empty)."""
+    problems = []
+    try:
+        conn.execute("EXPLAIN " + sql)
+    except sqlite3.Error as exc:
+        if not re.search(r"authoriz|prohibited", str(exc), re.I):  # a denial is run_sql's to report
+            return [f"SQLite rejects this SQL ({exc}). Fix the syntax; every date modifier goes "
+                    "inside the date() call, for example date('2026-09-28', '+1 day')."]
+    for modifier in dict.fromkeys(bad_date_modifiers(sql)):
+        problems.append(
+            f"'{modifier}' is not a SQLite date modifier, so the date becomes NULL and the "
+            "comparison silently matches nothing. Valid modifiers: '+N days', '-N months', "
+            "'start of month', 'start of year', 'weekday N'. Use a date literal or the dates "
+            "given in the glossary hints.")
+    try:
+        parents = {}
+        for child, parent in conn.execute("SELECT left_table, right_table FROM meta_joins "
+                                          "WHERE cardinality = 'many-to-one'"):
+            parents.setdefault(child, set()).add(parent)
+    except sqlite3.Error:
+        return problems
+    for scope in _select_scopes(sql):
+        tables = _scope_tables(scope)
+        names = {table for table, _ in tables}
+        if AGGREGATE.search(scope):
+            for parent in sorted({p for t in names for p in parents.get(t, ())}):
+                kids = sorted(t for t in names if parent in parents.get(t, ()))
+                if len(kids) > 1:
+                    problems.append(
+                        f"{' and '.join(kids)} are both joined in one aggregate query. Each "
+                        f"{kids[0]} row is repeated once per matching {kids[1]} row, so every "
+                        f"count and sum is inflated. Compute each count in its own subquery or "
+                        f"CTE grouped by {parent} id, then join the results.")
+        base = tables[0][0] if tables else None
+        for m in LEFT_JOIN.finditer(scope):
+            table = m.group(1).lower()
+            alias = (m.group(2) or table).lower()
+            alias = table if alias in SQL_WORDS else alias
+            literal = (rf"\b{re.escape(alias)}\.\w+\s*(?:=|<>|!=|<=|>=|<|>|\bin\b|\blike\b)"
+                       r"\s*(?:'|\d|\()")
+            if base and table in parents.get(base, ()) and re.search(literal, m.group(3), re.I):
+                problems.append(
+                    f"A filter on {table} sits in the ON clause of LEFT JOIN {table}, but "
+                    f"{table} is the parent of {base}: the filter removes no {base} rows, so "
+                    f"every {base} row is counted. Use JOIN {table}, or put the filter in WHERE.")
+    return list(dict.fromkeys(problems))
+
+
+# Soft checks compare the SQL with the question. The wording of a question is a judgement call,
+# so a soft problem only sends the SQL back once; it never blocks the query.
+OPEN_FILTER = re.compile(r"status\s+in\s*\(\s*'New'\s*,\s*'In Progress'\s*,\s*'On Hold'\s*\)", re.I)
+OPEN_WORDS = re.compile(
+    r"\b(open|active|outstanding|unresolved|pending|backlog|still|ongoing|current|currently|"
+    r"waiting|in flight|in progress|on hold|new|not (?:yet )?(?:resolved|closed|fixed|finished|done))\b",
+    re.I)
+CANCELLED_FILTER = re.compile(
+    r"status\s*(?:<>|!=)\s*'Cancelled'|status\s+not\s+in\s*\([^)]*'Cancelled'[^)]*\)", re.I)
+# "scheduled next week" and "planned this month" already mean work that is still going ahead
+CANCELLED_WORDS = re.compile(
+    r"cancel|active|\blive\b|upcoming|future|\b(?:planned|scheduled)\s+(?:for|in|on|next|this|last|"
+    r"between|during)\b", re.I)
+LIST_VERB = re.compile(r"^\s*(show|list|display|give|get|find|which)\b", re.I)
+ROWS_OF = re.compile(r"\b(incident|ticket|change)s?\b", re.I)
+AGGREGATE_WORDS = re.compile(
+    r"\b(how many|number|count|total|average|avg|mean|median|rate|percent\w*|ratio|share|sum|"
+    r"proportion)\b|%", re.I)
+HOW_MANY = re.compile(r"^\s*how many\b", re.I)
+PER_GROUP = re.compile(r"\b(each|per|by|every|grouped)\b", re.I)
+AGGREGATE_ITEM = re.compile(r"\s*(?:count|min|max|sum|avg)\s*\(", re.I)
+AVERAGE_NUMBER_PER = re.compile(r"\b(?:average|mean)\s+(?:number|count)\s+of\b.*\bper\s+\w+", re.I)
+FIXED_DIVISOR = re.compile(r"/\s*12(?:\.0+)?\b")
+
+
+def _select_items(scope):
+    """The comma-separated items of the first SELECT list in `scope` (subqueries are blanked)."""
+    match = re.search(r"\bselect\b(.*?)\bfrom\b", scope, re.I | re.S)
+    if not match:
+        return []
+    items, depth, start, text = [], 0, 0, match.group(1)
+    for i, ch in enumerate(text):
+        depth += (ch == "(") - (ch == ")")
+        if ch == "," and depth == 0:
+            items.append(text[start:i])
+            start = i + 1
+    return items + [text[start:]]
+
+
+def lint_question(question, sql, resolved):
+    """
+    Soft problems: the SQL adds a filter the question did not ask for, or returns the wrong shape
+    (an aggregate where rows were asked for, unlabelled per-group rows where one number was).
+    `resolved` = [(phrase, glossary row)] from resolve_terms; a term whose hint contains the
+    filter justifies it (for example 'overdue' justifies the open statuses).
+    """
+    problems = []
+    hints = " ".join((entry["sql_hint"] or "") for _, entry in resolved)
+    if OPEN_FILTER.search(sql) and "'On Hold'" not in hints and not OPEN_WORDS.search(question):
+        problems.append(
+            "The SQL keeps only open incidents (status New, In Progress, On Hold) but the question "
+            "does not ask for open incidents. Remove that status filter so every status counts. "
+            "'Opened' is a date (opened_at), not the status open.")
+    if CANCELLED_FILTER.search(sql) and "Cancelled" not in hints and not CANCELLED_WORDS.search(question):
+        problems.append(
+            "The SQL leaves out cancelled rows but the question did not ask to. Remove the "
+            "status <> 'Cancelled' filter so cancelled rows count.")
+    top = _select_scopes(sql)[-1]
+    items = _select_items(top)
+    only_aggregates = bool(items) and all(AGGREGATE_ITEM.match(item) for item in items)
+    grouped = bool(re.search(r"\bgroup\s+by\b", top, re.I))
+    if (only_aggregates and not grouped and LIST_VERB.match(question) and ROWS_OF.search(question)
+            and not AGGREGATE_WORDS.search(question)):
+        problems.append(
+            "The question asks to show or list rows, but the SQL returns one aggregate value. "
+            "Return the rows themselves: select the incident (or change) id and its key columns; "
+            "for 'oldest', 'latest' or 'longest' use ORDER BY ... LIMIT 1 instead of MIN or MAX.")
+    if AVERAGE_NUMBER_PER.search(question):
+        if grouped and items and not only_aggregates:
+            problems.append(
+                "'Average number of X per Y' is one number: the total divided by the number of Ys "
+                "(for example 1.0 * COUNT(*) / (SELECT COUNT(*) FROM assignment_groups)), not one "
+                "row per Y.")
+        if re.search(r"\bper\s+month\b", question, re.I) and FIXED_DIVISOR.search(top):
+            problems.append(
+                "Do not divide by a fixed number of months. Count incidents per calendar month in a "
+                "subquery, then take AVG of those counts over the months that have data.")
+    if only_aggregates and grouped and HOW_MANY.match(question) and not PER_GROUP.search(question):
+        problems.append(
+            "The question asks for one number, but GROUP BY makes the SQL return one unlabelled row "
+            "per group. To count groups, put the grouped query in a subquery and count its rows: "
+            "SELECT COUNT(*) FROM (SELECT ... GROUP BY ... HAVING ...).")
+    return problems
+
+
+# -----------------------------------------------------------------------------
 #  Public entry point
 # -----------------------------------------------------------------------------
 def _note_usage(result, reply):
@@ -327,12 +578,41 @@ def _set_sql(result, reply_text):
         result["sql"], result["unsafe"] = sql, str(exc)
 
 
+def _lint_and_repair(conn, result, context, question, resolved, history, provider, model):
+    """
+    Lint the generated SQL. On a problem, send it back to the model once. If the second attempt
+    still fails a hard check (lint_sql) it is blocked (result['unsafe']) rather than returned as a
+    wrong number; a soft check (lint_question) never blocks. Follow-up questions skip the soft
+    checks because their wording leans on the earlier turns. result['lint'] keeps the first
+    attempt's problems.
+    """
+    if result["unsafe"] or not result["sql"]:
+        return
+    soft = [] if history else lint_question(question, result["sql"], resolved)
+    problems = lint_sql(conn, result["sql"]) + soft
+    result["lint"] = problems
+    if not problems:
+        return
+    repair = (f"{question}\n\nYour previous SQL runs but gives a wrong answer.\n```sql\n"
+              f"{result['sql']}\n```\nProblems:\n" + "\n".join(f"- {p}" for p in problems) +
+              "\nReturn the corrected SQL only.")
+    reply = call_model(context, repair, result["provider"], result["model"])
+    _note_usage(result, reply)
+    _set_sql(result, reply.text)
+    result["lint_repaired"] = True
+    if result["unsafe"]:
+        return
+    remaining = lint_sql(conn, result["sql"])
+    if remaining:
+        result["unsafe"] = "; ".join(remaining)
+
+
 def translate(question, conn=None, provider=None, model=None, keep_context=False, history=None):
     """
     Translate a question into guarded SQL. `history` = earlier turns of the same conversation
     as [{"question": ..., "sql": ...}], oldest first; the last MAX_HISTORY_TURNS are shown to
     the model so follow-up questions keep their context.
-    Returns {question, terms, refusal, sql, assumption, unsafe, provider, model, llm_ms,
+    Returns {question, terms, refusal, sql, assumption, unsafe, lint, provider, model, llm_ms,
     tokens_in, tokens_out, tokens_cached}. Raises AgentAPIError when the model cannot be reached.
     """
     own = conn is None
@@ -340,7 +620,7 @@ def translate(question, conn=None, provider=None, model=None, keep_context=False
     try:
         resolved = resolve_terms(conn, question)
         result = {"question": question, "terms": [(p, e["term"]) for p, e in resolved],
-                  "refusal": None, "sql": None, "assumption": None, "unsafe": None,
+                  "refusal": None, "sql": None, "assumption": None, "unsafe": None, "lint": [],
                   "provider": None, "model": None, "llm_ms": 0,
                   "tokens_in": None, "tokens_out": None, "tokens_cached": None}
         blocked = [e for _, e in resolved if not e["is_answerable"]]
@@ -352,6 +632,7 @@ def translate(question, conn=None, provider=None, model=None, keep_context=False
         reply = call_model(context, with_history(question, history), provider, model)
         _note_usage(result, reply)
         _set_sql(result, reply.text)
+        _lint_and_repair(conn, result, context, question, resolved, history, provider, model)
         if keep_context:
             result["context"] = context
         return result
@@ -440,7 +721,7 @@ def ask(question, conn=None, provider=None, model=None, answer=True, history=Non
         result = translate(question, conn, provider, model, keep_context=True, history=history)
         context = result.pop("context", None)
         result.update(answer=None, followups=[], error=None, columns=[], rows=[], row_count=0,
-                      truncated=False, repaired=False, timings={})
+                      truncated=False, repaired=bool(result.pop("lint_repaired", False)), timings={})
         if result["refusal"]:
             result["answer"] = result["refusal"]
         elif result["unsafe"]:

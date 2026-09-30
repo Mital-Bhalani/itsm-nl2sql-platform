@@ -874,3 +874,518 @@ questions:
     order_matters: false
     ambiguous: false
     notes: "Regression for a false refusal (2026-09-30): 'assigned to' used to be a synonym of the unanswerable term 'assignee', so this team question was refused before any model call. 'Assigned to <team>' is a plain per-team count (all statuses)."
+
+  - id: D14
+    category: date_range
+    question: "How many incidents were opened last quarter?"
+    reference_sql: |
+      SELECT COUNT(*) AS incidents
+      FROM incidents i
+      WHERE i.opened_at >= '2026-04-01' AND i.opened_at < '2026-07-01'
+    expected:
+      columns: ["incidents"]
+      rows: [[22724]]
+    order_matters: false
+    ambiguous: false
+    notes: "As-of 2026-09-28 is in Q3, so last quarter = April-June 2026. SQLite has no 'start of quarter' modifier; the agent used it, the date became NULL and the answer was a silent 0."
+
+  - id: D15
+    category: date_range
+    question: "How many incidents were opened this quarter?"
+    reference_sql: |
+      SELECT COUNT(*) AS incidents
+      FROM incidents i
+      WHERE i.opened_at >= '2026-07-01' AND i.opened_at < '2026-10-01'
+    expected:
+      columns: ["incidents"]
+      rows: [[27276]]
+    order_matters: false
+    ambiguous: false
+    notes: "This quarter = July-September 2026. Same invalid-modifier failure as D14."
+
+  - id: J15
+    category: multi_table_join
+    question: "How many incidents and how many changes does each team have?"
+    reference_sql: |
+      SELECT g.name AS team, (SELECT COUNT(*)
+      FROM incidents i
+      WHERE i.assignment_group_id = g.id) AS incidents, (SELECT COUNT(*)
+      FROM changes c
+      WHERE c.assignment_group_id = g.id) AS changes
+      FROM assignment_groups g
+    expected:
+      columns: ["team", "incidents", "changes"]
+      rows: [["Service Desk", 17563, 490], ["Network", 8028, 2503], ["Database", 7105, 2023], ["Application Support", 9803, 2058], ["Infrastructure", 7501, 2926]]
+    order_matters: false
+    ambiguous: false
+    notes: "Join fan-out trap: joining incidents and changes to the team in one query repeats every incident once per change (Service Desk showed 696 and 696 instead of 174 and 4)."
+
+  - id: J16
+    category: multi_table_join
+    question: "How many incidents does each team have per agent?"
+    reference_sql: |
+      SELECT g.name AS team, 1.0 * (SELECT COUNT(*)
+      FROM incidents i
+      WHERE i.assignment_group_id = g.id) / (SELECT COUNT(*)
+      FROM users u
+      WHERE u.assignment_group_id = g.id AND u.role = 'agent') AS incidents_per_agent
+      FROM assignment_groups g
+    expected:
+      columns: ["team", "incidents_per_agent"]
+      rows: [["Service Desk", 1596.6363636363637], ["Network", 1605.6], ["Database", 1421.0], ["Application Support", 1960.6], ["Infrastructure", 1500.2]]
+    order_matters: false
+    tolerance: 0.01
+    ambiguous: true
+    alternatives:
+      - reading: "head count = every user in the team, not only role agent"
+        reference_sql: |
+          SELECT g.name AS team, 1.0 * (SELECT COUNT(*)
+          FROM incidents i
+          WHERE i.assignment_group_id = g.id) / (SELECT COUNT(*)
+          FROM users u
+          WHERE u.assignment_group_id = g.id) AS incidents_per_agent
+          FROM assignment_groups g
+        rows: [["Service Desk", 1463.5833333333333], ["Network", 1338.0], ["Database", 1184.1666666666667], ["Application Support", 1633.8333333333333], ["Infrastructure", 1250.1666666666667]]
+    notes: "Fan-out trap with users: the agent returned incident and agent counts of 1914 and 1914."
+
+  - id: J17
+    category: multi_table_join
+    question: "Which team has the most incidents per agent?"
+    reference_sql: |
+      SELECT g.name AS team
+      FROM assignment_groups g
+      ORDER BY 1.0 * (SELECT COUNT(*)
+      FROM incidents i
+      WHERE i.assignment_group_id = g.id) / (SELECT COUNT(*)
+      FROM users u
+      WHERE u.assignment_group_id = g.id AND u.role = 'agent') DESC
+      LIMIT 1
+    expected:
+      columns: ["team"]
+      rows: [["Application Support"]]
+    order_matters: false
+    ambiguous: true
+    alternatives:
+      - reading: "head count = every user in the team, not only role agent"
+        reference_sql: |
+          SELECT g.name AS team
+          FROM assignment_groups g
+          ORDER BY 1.0 * (SELECT COUNT(*)
+          FROM incidents i
+          WHERE i.assignment_group_id = g.id) / (SELECT COUNT(*)
+          FROM users u
+          WHERE u.assignment_group_id = g.id) DESC
+          LIMIT 1
+        rows: [["Application Support"]]
+    notes: "Only the team name is compared. The fanned-out query gave every team a ratio of 1.0."
+
+  - id: J18
+    category: multi_table_join
+    question: "How many incidents were opened each month by the Network team?"
+    reference_sql: |
+      SELECT strftime('%Y-%m', i.opened_at) AS month, COUNT(*) AS incidents
+      FROM incidents i
+      JOIN assignment_groups g ON g.id = i.assignment_group_id
+      WHERE g.name = 'Network'
+      GROUP BY month
+    expected:
+      columns: ["month", "incidents"]
+      rows: [["2026-04", 1147], ["2026-05", 1222], ["2026-06", 1207], ["2026-07", 1352], ["2026-08", 1193], ["2026-09", 1907]]
+    order_matters: false
+    ambiguous: false
+    alternatives:
+      - reading: "month as two digits"
+        reference_sql: |
+          SELECT strftime('%m', i.opened_at) AS month, COUNT(*) AS incidents
+          FROM incidents i
+          JOIN assignment_groups g ON g.id = i.assignment_group_id
+          WHERE g.name = 'Network'
+          GROUP BY month
+        rows: [["04", 1147], ["05", 1222], ["06", 1207], ["07", 1352], ["08", 1193], ["09", 1907]]
+    notes: "The team filter was put in a LEFT JOIN's ON clause, which removes no incident, so the answer showed all teams' monthly counts as Network's."
+
+  - id: K13
+    category: edge_case
+    question: "What is the SLA compliance rate?"
+    reference_sql: |
+      SELECT ROUND(100.0 * AVG(CASE WHEN (julianday(i.resolved_at) - julianday(i.opened_at)) * 1440 > s.target_minutes THEN 0.0 ELSE 1.0 END), 1) AS compliance_pct
+      FROM incidents i
+      JOIN sla_targets s ON s.priority = i.priority
+      WHERE i.status IN ('Resolved', 'Closed')
+    expected:
+      columns: ["compliance_pct"]
+      rows: [[85.0]]
+    order_matters: false
+    tolerance: 0.05
+    ambiguous: false
+    alternatives:
+      - reading: "ratio 0-1"
+        reference_sql: |
+          SELECT ROUND(AVG(CASE WHEN (julianday(i.resolved_at) - julianday(i.opened_at)) * 1440 > s.target_minutes THEN 0.0 ELSE 1.0 END), 3) AS compliance
+          FROM incidents i
+          JOIN sla_targets s ON s.priority = i.priority
+          WHERE i.status IN ('Resolved', 'Closed')
+        rows: [[0.85]]
+    notes: "Compliance = 1 - breach rate = 85.0% (0.85 also accepted). The agent returned the breach rate, 15.0, under the name sla_compliance_rate."
+
+  - id: K14
+    category: edge_case
+    question: "Which agent resolved the most incidents?"
+    reference_sql: null
+    expected:
+      refusal: true
+    ambiguous: false
+    notes: "Not answerable: incidents link to a team, not a person (glossary 'agent activity'). The agent used to join users to incidents through the team and name a user id."
+
+  - id: K15
+    category: edge_case
+    question: "How many incidents were escalated?"
+    reference_sql: null
+    expected:
+      refusal: true
+    ambiguous: false
+    notes: "Not answerable: there is no escalation column or status (glossary 'escalation'). The agent used to invent status = 'Escalated' and answer 0."
+
+  - id: K16
+    category: edge_case
+    question: "Predict how many incidents will be opened next month"
+    reference_sql: null
+    expected:
+      refusal: true
+    ambiguous: false
+    notes: "Not answerable: the platform does not forecast (glossary 'forecast'). The agent used to count future rows and label the 0 'predicted_incidents'."
+
+  - id: K17
+    category: edge_case
+    question: "How many incidents were resolved by each agent?"
+    reference_sql: null
+    expected:
+      refusal: true
+    ambiguous: false
+    notes: "Not answerable: same as K14. The agent used to return 3100 'resolved incidents' from a fanned-out join of incidents and users."
+
+  - id: E13
+    category: easy_lookup
+    question: "Show the 5 most recently opened incidents"
+    reference_sql: |
+      SELECT i.id
+      FROM incidents i
+      ORDER BY i.opened_at DESC, i.id DESC
+      LIMIT 5
+    expected:
+      columns: ["id"]
+      rows: [[38229], [20033], [19422], [13976], [15106]]
+    order_matters: true
+    ambiguous: false
+    notes: "The agent added an unrequested open-status filter. Ids only are compared, in order."
+
+  - id: E14
+    category: easy_lookup
+    question: "Show the oldest open incident"
+    reference_sql: |
+      SELECT i.id
+      FROM incidents i
+      WHERE i.status IN ('New', 'In Progress', 'On Hold')
+      ORDER BY i.opened_at ASC, i.id ASC
+      LIMIT 1
+    expected:
+      columns: ["id"]
+      rows: [[47733]]
+    order_matters: false
+    ambiguous: false
+    notes: "The agent returned MIN(opened_at), a date, not the incident."
+
+  - id: E15
+    category: easy_lookup
+    question: "List all P1 incidents that are still open"
+    reference_sql: |
+      SELECT i.id
+      FROM incidents i
+      WHERE i.priority = 1 AND i.status IN ('New', 'In Progress', 'On Hold')
+    expected:
+      columns: ["id"]
+      rows: [[196], [933], [962], [1461], [1852], [1984], [2056], [2288], [2562], [2620], [3768], [3782], [4037], [4257], [4263], [4278], [4898], [5198], [5272], [5464], [5494], [5930], [6054], [6055], [6327], [6329], [6512], [6615], [6866], [7037], [7123], [7249], [7278], [7290], [7352], [7475], [7481], [7510], [7655], [7663], [8103], [8138], [8151], [8421], [8469], [8548], [8882], [8890], [9111], [9412], [9417], [9714], [9951], [10001], [10158], [10169], [10324], [10410], [10436], [10664], [10669], [10917], [11370], [11565], [11756], [11768], [11786], [11791], [11939], [11998], [12034], [12368], [13086], [13181], [13243], [13393], [13462], [14366], [14484], [14547], [14617], [14867], [15001], [15079], [15668], [15697], [15788], [16025], [16213], [16251], [16259], [16346], [16401], [16520], [16574], [16727], [16951], [17180], [17700], [17840], [17967], [18007], [18056], [18497], [18712], [18887], [18983], [19456], [20010], [20162], [20561], [21200], [21340], [21341], [21515], [21700], [22075], [22483], [22508], [22560], [22603], [22958], [22970], [23469], [23596], [23924], [23956], [24039], [24298], [24745], [24968], [24988], [25144], [25150], [25229], [25244], [25661], [25847], [25946], [26317], [26736], [27279], [27351], [27458], [27463], [27514], [28396], [29445], [29521], [29596], [29811], [30065], [30132], [30316], [30538], [30545], [30685], [31026], [31305], [31386], [31630], [31737], [32008], [32131], [32281], [32344], [32896], [33150], [33188], [33344], [33750], [34062], [34156], [34229], [34606], [34629], [34855], [35273], [35687], [35694], [35974], [36091], [36283], [36383], [37286], [37384], [37404], [37471], [37488], [37739], [38138], [38176], [38271], [38389], [38568], [38602], [39024], [39094], [39685], [39788], [39899], [39979], [40060], [40168], [41053], [41106], [41747], [41817], [41978], [42022], [42061], [42267], [42407], [42423], [42507], [42622], [42801], [42985], [43058], [43163], [43253], [43393], [43425], [43679], [43685], [43744], [43874], [44286], [44339], [44851], [44870], [45467], [45495], [45725], [45902], [45959], [45987], [46332], [46620], [46870], [47328], [47363], [47707], [47888], [47961], [48277], [49075], [49320], [49483], [49543], [49579], [49652]]
+    order_matters: false
+    ambiguous: false
+    notes: "'List' asks for the rows; the agent returned a count. 1 row at the default size, 252 on the large set."
+
+  - id: E16
+    category: easy_lookup
+    question: "Show incidents reopened more than twice"
+    reference_sql: |
+      SELECT i.id
+      FROM incidents i
+      WHERE i.reopened_count > 2
+    expected:
+      columns: ["id"]
+      rows: []
+    order_matters: false
+    ambiguous: false
+    notes: "No incident was reopened more than twice at either size, so the right answer is an empty list. The agent returned a one-row count of 0 instead of a list."
+
+  - id: D16
+    category: date_range
+    question: "How many changes start on a weekend?"
+    reference_sql: |
+      SELECT COUNT(*) AS weekend_changes
+      FROM changes c
+      WHERE strftime('%w', c.planned_start) IN ('0', '6')
+    expected:
+      columns: ["weekend_changes"]
+      rows: [[2876]]
+    order_matters: false
+    ambiguous: false
+    notes: "Sunday = 0, Saturday = 6. The agent dropped cancelled changes without being asked (27, not 28)."
+
+  - id: D17
+    category: date_range
+    question: "How many changes were planned last month?"
+    reference_sql: |
+      SELECT COUNT(*) AS changes
+      FROM changes c
+      WHERE c.planned_start >= '2026-08-01' AND c.planned_start < '2026-09-01'
+    expected:
+      columns: ["changes"]
+      rows: [[1564]]
+    order_matters: false
+    ambiguous: true
+    alternatives:
+      - reading: "active changes only (cancelled ones left out)"
+        reference_sql: |
+          SELECT COUNT(*) AS changes
+          FROM changes c
+          WHERE c.status <> 'Cancelled' AND c.planned_start >= '2026-08-01' AND c.planned_start < '2026-09-01'
+        rows: [[1414]]
+    notes: "Last month = August 2026 on planned_start. Both readings are accepted; the agent chose the second without saying so (19 vs 20)."
+
+  - id: D18
+    category: date_range
+    question: "How many incidents were opened today?"
+    reference_sql: |
+      SELECT COUNT(*) AS incidents
+      FROM incidents i
+      WHERE i.opened_at >= '2026-09-28' AND i.opened_at < '2026-09-29'
+    expected:
+      columns: ["incidents"]
+      rows: [[0]]
+    order_matters: false
+    ambiguous: false
+    notes: "Today is the as-of date 2026-09-28 and the data ends on 09-27, so the answer is 0. The agent once wrote a syntax error (a stray '+1 day' argument outside date()); ask() repairs it, translate() does not, and the evals call translate()."
+
+  - id: D19
+    category: date_range
+    question: "How many incidents were opened between 9am and 5pm?"
+    reference_sql: |
+      SELECT COUNT(*) AS incidents
+      FROM incidents i
+      WHERE CAST(strftime('%H', i.opened_at) AS INTEGER) >= 9 AND CAST(strftime('%H', i.opened_at) AS INTEGER) < 17
+    expected:
+      columns: ["incidents"]
+      rows: [[33923]]
+    order_matters: false
+    ambiguous: true
+    alternatives:
+      - reading: "5pm inclusive (any time up to 17:59)"
+        reference_sql: |
+          SELECT COUNT(*) AS incidents
+          FROM incidents i
+          WHERE CAST(strftime('%H', i.opened_at) AS INTEGER) BETWEEN 9 AND 17
+        rows: [[38216]]
+    notes: "A time of day across all dates. The agent applied it to the as-of day only and answered 0."
+
+  - id: J19
+    category: multi_table_join
+    question: "How many P1 incidents does each team have?"
+    reference_sql: |
+      SELECT g.name AS team, COUNT(i.id) AS p1_incidents
+      FROM assignment_groups g
+      LEFT
+      JOIN incidents i ON i.assignment_group_id = g.id AND i.priority = 1
+      GROUP BY g.id
+    expected:
+      columns: ["team", "p1_incidents"]
+      rows: [["Service Desk", 890], ["Network", 411], ["Database", 330], ["Application Support", 455], ["Infrastructure", 391]]
+    order_matters: false
+    ambiguous: false
+    notes: "Every status counts. The agent added an open-status filter to 'P1 incidents' when asked which team has the most (Service Desk, 1 open, instead of a three-way tie at 4)."
+
+  - id: J20
+    category: multi_table_join
+    question: "What is the average planned duration of a change in hours?"
+    reference_sql: |
+      SELECT AVG((julianday(c.planned_end) - julianday(c.planned_start)) * 24) AS avg_hours
+      FROM changes c
+    expected:
+      columns: ["avg_hours"]
+      rows: [[2.252524999961257]]
+    order_matters: false
+    tolerance: 0.01
+    ambiguous: false
+    notes: "All changes, cancelled included. The agent dropped cancelled ones: 2.492 h instead of 2.455 h."
+
+  - id: J21
+    category: multi_table_join
+    question: "How many teams have more than 10 open incidents?"
+    reference_sql: |
+      SELECT COUNT(*) AS teams
+      FROM (SELECT i.assignment_group_id
+      FROM incidents i
+      WHERE i.status IN ('New', 'In Progress', 'On Hold')
+      GROUP BY i.assignment_group_id
+      HAVING COUNT(*) > 10)
+    expected:
+      columns: ["teams"]
+      rows: [[5]]
+    order_matters: false
+    ambiguous: false
+    notes: "One number. The agent returned one row per team (COUNT(*) per group) instead of counting teams. 1 at the default size, 5 on the large set."
+
+  - id: J22
+    category: multi_table_join
+    question: "Compare SLA breach counts between P1 and P2"
+    reference_sql: |
+      SELECT i.priority, COUNT(*) AS breaches
+      FROM incidents i
+      JOIN sla_targets s ON s.priority = i.priority
+      WHERE i.status IN ('Resolved', 'Closed') AND (julianday(i.resolved_at) - julianday(i.opened_at)) * 1440 > s.target_minutes AND i.priority IN (1, 2)
+      GROUP BY i.priority
+    expected:
+      columns: ["priority", "breaches"]
+      rows: [[1, 338], [2, 1013]]
+    order_matters: false
+    ambiguous: true
+    alternatives:
+      - reading: "one row, one column per priority"
+        reference_sql: |
+          SELECT SUM(CASE WHEN i.priority = 1 THEN 1 ELSE 0 END) AS p1_breaches, SUM(CASE WHEN i.priority = 2 THEN 1 ELSE 0 END) AS p2_breaches
+          FROM incidents i
+          JOIN sla_targets s ON s.priority = i.priority
+          WHERE i.status IN ('Resolved', 'Closed') AND (julianday(i.resolved_at) - julianday(i.opened_at)) * 1440 > s.target_minutes AND i.priority IN (1, 2)
+        rows: [[338, 1013]]
+    notes: "Two layouts of the same numbers are accepted."
+
+  - id: J23
+    category: multi_table_join
+    question: "Which team has the highest percentage of P1 incidents?"
+    reference_sql: |
+      SELECT g.name AS team
+      FROM incidents i
+      JOIN assignment_groups g ON g.id = i.assignment_group_id
+      GROUP BY g.id
+      ORDER BY 1.0 * SUM(i.priority = 1) / COUNT(*) DESC
+      LIMIT 1
+    expected:
+      columns: ["team"]
+      rows: [["Infrastructure"]]
+    order_matters: false
+    ambiguous: false
+    notes: "Percentage of the team's own incidents that are P1. The probe wording 'highest share of P1 incidents' was read by the agent as the team's share of all P1 incidents instead."
+
+  - id: J24
+    category: multi_table_join
+    question: "How many incidents breached SLA in each priority last month?"
+    reference_sql: |
+      SELECT i.priority, COUNT(*) AS breaches
+      FROM incidents i
+      JOIN sla_targets s ON s.priority = i.priority
+      WHERE i.status IN ('Resolved', 'Closed') AND (julianday(i.resolved_at) - julianday(i.opened_at)) * 1440 > s.target_minutes AND i.opened_at >= '2026-08-01' AND i.opened_at < '2026-09-01'
+      GROUP BY i.priority
+    expected:
+      columns: ["priority", "breaches"]
+      rows: [[1, 48], [2, 171], [3, 539], [4, 320]]
+    order_matters: false
+    ambiguous: true
+    alternatives:
+      - reading: "every priority listed, zero breaches included"
+        reference_sql: |
+          SELECT i.priority, SUM(CASE WHEN (julianday(i.resolved_at) - julianday(i.opened_at)) * 1440 > s.target_minutes THEN 1 ELSE 0 END) AS breaches
+          FROM incidents i
+          JOIN sla_targets s ON s.priority = i.priority
+          WHERE i.status IN ('Resolved', 'Closed') AND i.opened_at >= '2026-08-01' AND i.opened_at < '2026-09-01'
+          GROUP BY i.priority
+        rows: [[1, 48], [2, 171], [3, 539], [4, 320]]
+      - reading: "breach counted in the month the incident was resolved (resolved_at)"
+        reference_sql: |
+          SELECT i.priority, SUM(CASE WHEN (julianday(i.resolved_at) - julianday(i.opened_at)) * 1440 > s.target_minutes THEN 1 ELSE 0 END) AS breaches
+          FROM incidents i
+          JOIN sla_targets s ON s.priority = i.priority
+          WHERE i.status IN ('Resolved', 'Closed') AND i.resolved_at >= '2026-08-01' AND i.resolved_at < '2026-09-01'
+          GROUP BY i.priority
+        rows: [[1, 52], [2, 179], [3, 577], [4, 354]]
+    notes: "Priorities with no breach may be left out or shown as 0; both are accepted. The catalog filters a breach window on opened_at; filtering on resolved_at is also accepted (as for J13), because it differs only on the large set."
+
+  - id: K18
+    category: edge_case
+    question: "What is the median resolution time in hours?"
+    reference_sql: |
+      SELECT AVG(h) AS median_hours
+      FROM (SELECT (julianday(resolved_at) - julianday(opened_at)) * 24 AS h
+      FROM incidents
+      WHERE resolved_at IS NOT NULL
+      ORDER BY h
+      LIMIT 2 - (SELECT COUNT(*)
+      FROM incidents
+      WHERE resolved_at IS NOT NULL) % 2 OFFSET (SELECT (COUNT(*) - 1) / 2
+      FROM incidents
+      WHERE resolved_at IS NOT NULL))
+    expected:
+      columns: ["median_hours"]
+      rows: [[29.19819444604218]]
+    order_matters: false
+    tolerance: 0.05
+    ambiguous: false
+    notes: "Median, not mean: 31.6 h (the mean is 47.1 h). The agent computed AVG and called it the median."
+
+  - id: K19
+    category: edge_case
+    question: "What is the running total of incidents opened by month?"
+    reference_sql: |
+      SELECT month, SUM(n) OVER (ORDER BY month) AS running_total
+      FROM (SELECT strftime('%Y-%m', opened_at) AS month, COUNT(*) AS n
+      FROM incidents
+      GROUP BY month)
+    expected:
+      columns: ["month", "running_total"]
+      rows: [["2026-04", 7456], ["2026-05", 15249], ["2026-06", 22724], ["2026-07", 30870], ["2026-08", 38334], ["2026-09", 50000]]
+    order_matters: false
+    ambiguous: false
+    alternatives:
+      - reading: "month as two digits"
+        reference_sql: |
+          SELECT month, SUM(n) OVER (ORDER BY month) AS running_total
+          FROM (SELECT strftime('%m', opened_at) AS month, COUNT(*) AS n
+          FROM incidents
+          GROUP BY month)
+        rows: [["04", 7456], ["05", 15249], ["06", 22724], ["07", 30870], ["08", 38334], ["09", 50000]]
+    notes: "Cumulative: 68, 143, 216, 313, 383, 500. The agent returned the plain monthly counts."
+
+  - id: K20
+    category: edge_case
+    question: "What is the average number of incidents per month?"
+    reference_sql: |
+      SELECT AVG(n) AS avg_per_month
+      FROM (SELECT COUNT(*) AS n
+      FROM incidents
+      GROUP BY strftime('%Y-%m', opened_at))
+    expected:
+      columns: ["avg_per_month"]
+      rows: [[8333.333333333334]]
+    order_matters: false
+    tolerance: 0.01
+    ambiguous: false
+    notes: "Average over the 6 months that have data (Apr-Sep 2026): 83.3. The agent divided by a hard-coded 12 (41.7)."
+
+  - id: K21
+    category: edge_case
+    question: "What is the average number of changes per team?"
+    reference_sql: |
+      SELECT 1.0 * COUNT(*) / (SELECT COUNT(*)
+      FROM assignment_groups) AS avg_changes_per_team
+      FROM changes
+    expected:
+      columns: ["avg_changes_per_team"]
+      rows: [[2000.0]]
+    order_matters: false
+    tolerance: 0.01
+    ambiguous: false
+    notes: "One number: 100 changes / 5 teams = 20.0. The agent returned each team's own count labelled as the average."

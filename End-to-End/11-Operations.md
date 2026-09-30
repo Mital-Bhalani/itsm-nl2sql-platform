@@ -10,8 +10,8 @@ cp .env.example .env                 # then set OPENAI_API_KEY (and ANTHROPIC_AP
 python db/seed.py                    # build db/tickets.sqlite
 python semantics/build_catalog.py    # add the meta_* catalog (always after seeding)
 cd web && npm install && npm run build && cd ..    # optional: the React UI
-python -B -m pytest tests -p no:cacheprovider      # 83 tests, no API key needed
-python evals/run_evals.py --self-test              # expect 51/51
+python -B -m pytest tests -p no:cacheprovider      # 130 tests, no API key needed
+python evals/run_evals.py --self-test              # expect 80/80
 cd web && npm run e2e && cd ..                     # 22 Playwright checks in Edge (starts its own API on 8010)
 ```
 

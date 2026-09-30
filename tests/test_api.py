@@ -153,7 +153,7 @@ def test_self_test_eval_job(client):
         if job["status"] in ("done", "failed"):
             break
         time.sleep(0.1)
-    assert job["status"] == "done" and job["passed"] == job["total"] == 51
+    assert job["status"] == "done" and job["passed"] == job["total"] == 80
 
 
 def test_live_eval_needs_a_configured_provider(client, monkeypatch):
