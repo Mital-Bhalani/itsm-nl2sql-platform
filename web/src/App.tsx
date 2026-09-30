@@ -3,19 +3,24 @@ import { lazy } from 'react'
 import { HashRouter, Navigate, Route, Routes } from 'react-router-dom'
 import Layout from '@/components/Layout'
 import { SettingsProvider } from '@/lib/settings'
+import { preloadPage } from '@/routes'
 
-const AskPage = lazy(() => import('@/pages/Ask'))
-const CatalogPage = lazy(() => import('@/pages/Catalog'))
-const DashboardPage = lazy(() => import('@/pages/Dashboard'))
-const DataCheckPage = lazy(() => import('@/pages/DataCheck'))
-const EvalsPage = lazy(() => import('@/pages/Evals'))
-const ExplorerPage = lazy(() => import('@/pages/Explorer'))
-const HomePage = lazy(() => import('@/pages/Home'))
-const IncidentPage = lazy(() => import('@/pages/Incident'))
+// lazy() goes through preloadPage so a chunk fetched by the sidebar prefetch is reused here.
+const page = (path: string) => lazy(() => preloadPage(path) as Promise<{ default: React.ComponentType }>)
+const HomePage = page('/')
+const AskPage = page('/ask')
+const DashboardPage = page('/dashboard')
+const ExplorerPage = page('/explorer')
+const IncidentPage = page('/incident')
+const CatalogPage = page('/catalog')
+const EvalsPage = page('/evals')
+const DataCheckPage = page('/data-check')
 
-// Data is re-read from the API after 10 seconds, matching the Streamlit UI; the sidebar's
-// "Refresh from database" button forces it immediately.
-const client = new QueryClient({ defaultOptions: { queries: { staleTime: 10_000, retry: 1, refetchOnWindowFocus: true } } })
+// Data is re-read from the API after 10 seconds; the sidebar's "Refresh from database" button
+// forces it immediately. Cached answers are kept for 10 minutes, so returning to a page is instant.
+const client = new QueryClient({
+  defaultOptions: { queries: { staleTime: 10_000, gcTime: 10 * 60_000, retry: 1, refetchOnWindowFocus: true } },
+})
 
 export default function App() {
   return (

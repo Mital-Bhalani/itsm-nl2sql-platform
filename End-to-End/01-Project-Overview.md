@@ -73,6 +73,5 @@ A 50,000-incident version exists for scale testing. Details in
 | Database | SQLite (STRICT tables), Python standard library |
 | AI | OpenAI (`gpt-4o-mini`, default) or Anthropic (`claude-opus-5-5`) |
 | Backend | FastAPI, Uvicorn, Pydantic |
-| Front end 1 | Streamlit, pandas, Altair |
-| Front end 2 | React 19, TypeScript, Vite, Tailwind CSS 4, TanStack Query, Recharts |
-| Quality | pytest (69 tests), golden-set evals (15 questions, 15/15) |
+| Front end | React 19, TypeScript, Vite, Tailwind CSS 4, TanStack Query, Recharts |
+| Quality | pytest (83 tests), Playwright end-to-end (22), golden-set evals (51 questions), GitHub Actions CI |

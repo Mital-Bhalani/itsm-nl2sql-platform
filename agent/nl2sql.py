@@ -38,8 +38,10 @@ ROOT = Path(__file__).resolve().parent.parent
 DB_PATH = ROOT / "db" / "tickets.sqlite"
 sys.path.insert(0, str(ROOT / "semantics"))
 sys.path.insert(0, str(ROOT / "agent"))
+sys.path.insert(0, str(ROOT / "db"))
 
-from build_catalog import AS_OF, find_term  # noqa: E402
+from build_catalog import catalog_as_of, find_term  # noqa: E402
+from dialect import DIALECT  # noqa: E402
 from llm import AgentAPIError, complete  # noqa: E402,F401  (AgentAPIError re-exported)
 
 MAX_ROWS = 1000
@@ -175,18 +177,24 @@ def _rows(conn, sql):
 
 
 def build_context(conn, resolved):
+    as_of = catalog_as_of(conn)
     lines = [
-        "You translate questions about ITSM ticket data into ONE SQLite SELECT statement.",
+        f"You translate questions about ITSM ticket data into ONE {DIALECT.label} SELECT statement.",
         "",
         "RULES",
-        f"- Today is {AS_OF} 00:00:00 UTC. Never use now(), CURRENT_DATE or the real clock; "
-        f"compute relative dates from '{AS_OF}'.",
-        "- SQLite dialect. Timestamps are TEXT 'YYYY-MM-DD HH:MM:SS' UTC.",
+        f"- Today is {as_of} 00:00:00 UTC. Never use now(), CURRENT_DATE or the real clock; "
+        f"compute relative dates from '{as_of}'.",
+        f"- {DIALECT.label} dialect. {DIALECT.timestamp_note}",
+        "- If a CONVERSATION SO FAR is given, the question may be a follow-up ('and by "
+        "priority?', 'same for last week'): keep the previous question's subject, filters "
+        "and metric and change only what the new question asks.",
         "- Exactly one read-only SELECT (or WITH ... SELECT). No other statements.",
         "- Never select users.name (personal data).",
         "- Use the aliases i = incidents, c = changes, g = assignment_groups, u = users, "
         "s = sla_targets.",
-        "- Use metric SQL and glossary hints below exactly as given; do not invent formulas.",
+        "- Use metric SQL and glossary hints below exactly as given; do not invent formulas or "
+        "shorten status lists (an open incident is always i.status IN ('New', 'In Progress', "
+        "'On Hold'), all three).",
         "- Only when the result has one row per team, start FROM assignment_groups g with LEFT "
         "JOIN so teams with zero rows appear with 0; then every filter on the joined tables "
         "(status, dates, priority) goes in the LEFT JOIN's ON clause, never in WHERE, and "
@@ -244,6 +252,27 @@ def call_model(system_prompt, question, provider=None, model=None):
     return complete(system_prompt, question, provider=provider, model=model)
 
 
+MAX_HISTORY_TURNS = 3
+
+
+def with_history(question, history):
+    """
+    The user message for the SQL call: the last few (question, sql) turns of the conversation,
+    then the new question. History goes in the user message, not the system prompt, so the
+    system prompt (the catalog) stays identical between calls and the provider can cache it.
+    """
+    turns = [t for t in (history or []) if isinstance(t, dict) and t.get("question")]
+    turns = turns[-MAX_HISTORY_TURNS:]
+    if not turns:
+        return question
+    lines = ["CONVERSATION SO FAR"]
+    for turn in turns:
+        lines.append(f"Q: {turn['question']}")
+        lines.append(f"SQL: {turn.get('sql') or '(no SQL was produced)'}")
+    lines += ["", f"NEW QUESTION: {question}"]
+    return "\n".join(lines)
+
+
 def extract_sql(text):
     """Return (sql, assumption) from the model reply."""
     block = re.search(r"```(?:sql)?\s*(.*?)```", text, re.S | re.I)
@@ -283,7 +312,7 @@ def _note_usage(result, reply):
     """Record which model answered and add its latency and token counts to the result."""
     result["provider"], result["model"] = reply.provider, reply.model
     result["llm_ms"] = result.get("llm_ms", 0) + reply.latency_ms
-    for key in ("tokens_in", "tokens_out"):
+    for key in ("tokens_in", "tokens_out", "tokens_cached"):
         value = getattr(reply, key)
         if value is not None:
             result[key] = (result.get(key) or 0) + value
@@ -298,11 +327,13 @@ def _set_sql(result, reply_text):
         result["sql"], result["unsafe"] = sql, str(exc)
 
 
-def translate(question, conn=None, provider=None, model=None, keep_context=False):
+def translate(question, conn=None, provider=None, model=None, keep_context=False, history=None):
     """
-    Translate a question into guarded SQL.
+    Translate a question into guarded SQL. `history` = earlier turns of the same conversation
+    as [{"question": ..., "sql": ...}], oldest first; the last MAX_HISTORY_TURNS are shown to
+    the model so follow-up questions keep their context.
     Returns {question, terms, refusal, sql, assumption, unsafe, provider, model, llm_ms,
-    tokens_in, tokens_out}. Raises AgentAPIError when the model cannot be reached.
+    tokens_in, tokens_out, tokens_cached}. Raises AgentAPIError when the model cannot be reached.
     """
     own = conn is None
     conn = conn or connect_readonly()
@@ -311,14 +342,14 @@ def translate(question, conn=None, provider=None, model=None, keep_context=False
         result = {"question": question, "terms": [(p, e["term"]) for p, e in resolved],
                   "refusal": None, "sql": None, "assumption": None, "unsafe": None,
                   "provider": None, "model": None, "llm_ms": 0,
-                  "tokens_in": None, "tokens_out": None}
+                  "tokens_in": None, "tokens_out": None, "tokens_cached": None}
         blocked = [e for _, e in resolved if not e["is_answerable"]]
         if blocked:
             e = blocked[0]
             result["refusal"] = f"Cannot answer: '{e['term']}' is not in the data. {e['definition']}"
             return result
         context = build_context(conn, resolved)
-        reply = call_model(context, question, provider, model)
+        reply = call_model(context, with_history(question, history), provider, model)
         _note_usage(result, reply)
         _set_sql(result, reply.text)
         if keep_context:
@@ -395,9 +426,10 @@ def _execute(conn, result):
     return True
 
 
-def ask(question, conn=None, provider=None, model=None, answer=True):
+def ask(question, conn=None, provider=None, model=None, answer=True, history=None):
     """
     Full pipeline: translate, run read-only, repair once on an SQLite error, answer in words.
+    `history` (optional) = earlier turns [{"question", "sql"}] of the same conversation.
     Returns translate()'s keys plus {answer, followups, error, columns, rows, row_count, truncated,
     repaired, timings}. Raises AgentAPIError when the SQL model call itself fails.
     """
@@ -405,7 +437,7 @@ def ask(question, conn=None, provider=None, model=None, answer=True):
     conn = conn or connect_readonly()
     started = time.perf_counter()
     try:
-        result = translate(question, conn, provider, model, keep_context=True)
+        result = translate(question, conn, provider, model, keep_context=True, history=history)
         context = result.pop("context", None)
         result.update(answer=None, followups=[], error=None, columns=[], rows=[], row_count=0,
                       truncated=False, repaired=False, timings={})

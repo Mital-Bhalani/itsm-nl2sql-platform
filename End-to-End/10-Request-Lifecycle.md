@@ -1,4 +1,4 @@
-# 11. Request lifecycle: one question, start to finish
+# 10. Request lifecycle: one question, start to finish
 
 This chapter follows a single question through every layer, naming the exact file and
 function at each step. Use it to find where to look when something goes wrong.

@@ -14,7 +14,7 @@ Run everything from the project root with `python -B` (no `__pycache__`), stop a
 3. **Golden set:** `python -B evals/make_golden_set.py --db db/tickets_large.sqlite --out evals/golden_set_large.yaml`. Then run `git diff --stat evals/golden_set_large.yaml`:
    - at the default size the file must be **unchanged** (the data is deterministic); if it changed, report it as a problem
    - at a custom size it will change: say so, and warn that `golden_set_large.yaml` is committed, so the change should only be committed if the new size is meant to become the standard
-4. **Self-test (no API):** `python -B evals/run_evals.py --golden evals/golden_set_large.yaml --self-test`. It must be 15/15.
+4. **Self-test (no API):** `python -B evals/run_evals.py --golden evals/golden_set_large.yaml --self-test`. It must be 51/51.
 5. **Live (only with `live`):** `python -B evals/run_evals.py --golden evals/golden_set_large.yaml`. This calls the OpenAI API 14 times. If it stops on a missing key or no credits, report that as the cause, not as a failure of the build.
 
 **Report** one table with a row per step (command, result, time taken) and then:

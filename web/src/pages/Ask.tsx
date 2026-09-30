@@ -1,10 +1,11 @@
-import { Ban, Download, Info, Send, ThumbsDown, ThumbsUp, Trash2 } from 'lucide-react'
+import { Ban, Download, Info, Send, Star, ThumbsDown, ThumbsUp, Trash2, X } from 'lucide-react'
 import { useEffect, useRef, useState } from 'react'
 import { useSearchParams } from 'react-router-dom'
 import AutoChart, { chartSpec } from '@/components/AutoChart'
 import { useModel } from '@/components/Layout'
 import { Button, Card, DataTable, ErrorBox, Notice, PageHeader, Spinner, cn, downloadCsv } from '@/components/ui'
-import { api, type AskResult } from '@/lib/api'
+import { api, type AskResult, type AskTurn } from '@/lib/api'
+import { useSavedQuestions } from '@/lib/saved'
 import { useSettings } from '@/lib/settings'
 
 const EXAMPLES = [
@@ -33,7 +34,7 @@ function Result({ result, question, latest, onAsk }: {
   if (!isAnswer(result)) return <ErrorBox error={result.error} />
   if (result.refusal) {
     return (
-      <div className="flex items-start gap-2 rounded-xl border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-800">
+      <div className="flex items-start gap-2 rounded-xl border border-tone-warn bg-tone-warn px-4 py-3 text-sm text-tone-warn">
         <Ban className="mt-0.5 size-4 shrink-0" /> {result.refusal}
       </div>
     )
@@ -50,16 +51,16 @@ function Result({ result, question, latest, onAsk }: {
   }
   return (
     <div className="flex flex-col gap-3">
-      {result.answer && <p className="text-lg font-semibold leading-snug text-slate-900">{result.answer}</p>}
+      {result.answer && <p className="text-lg font-semibold leading-snug text-ink">{result.answer}</p>}
       {result.error && <ErrorBox error={result.error} />}
       {result.assumption && (
-        <div className="flex items-start gap-2 rounded-xl border border-sky-200 bg-sky-50 px-3 py-2 text-sm text-sky-800">
+        <div className="flex items-start gap-2 rounded-xl border border-tone-info bg-tone-info px-3 py-2 text-sm text-tone-info">
           <Info className="mt-0.5 size-4 shrink-0" /> Assumption: {result.assumption}
         </div>
       )}
       {result.sql && (
         <div>
-          <div className="mb-2 flex gap-1 border-b border-slate-200">
+          <div className="mb-2 flex gap-1 border-b border-line">
             {(['chart', 'table', 'sql'] as const)
               .filter((t) => t !== 'chart' || spec)
               .map((t) => (
@@ -68,7 +69,7 @@ function Result({ result, question, latest, onAsk }: {
                   onClick={() => setTab(t)}
                   className={cn(
                     '-mb-px border-b-2 px-3 py-1.5 text-sm font-medium capitalize',
-                    active === t ? 'border-brand-600 text-brand-700' : 'border-transparent text-slate-500 hover:text-slate-700',
+                    active === t ? 'border-brand-600 text-brand-text' : 'border-transparent text-muted hover:text-ink-2',
                   )}
                 >
                   {t === 'sql' ? 'SQL' : t}
@@ -83,7 +84,7 @@ function Result({ result, question, latest, onAsk }: {
                 rows={result.rows.map((r) => Object.fromEntries(result.columns.map((c, i) => [c, r[i]])))}
                 maxHeight={320}
               />
-              <div className="mt-2 flex items-center justify-between text-xs text-slate-500">
+              <div className="mt-2 flex items-center justify-between text-xs text-muted">
                 <span>
                   {result.row_count} rows{result.truncated ? ' (capped at 1,000)' : ''}
                 </span>
@@ -95,36 +96,36 @@ function Result({ result, question, latest, onAsk }: {
           )}
           {active === 'sql' && (
             <>
-              {result.repaired && <p className="mb-1 text-xs text-slate-500">The first SQL failed; this is the corrected version.</p>}
-              <pre className="overflow-auto rounded-xl bg-slate-900 p-4 font-mono text-xs leading-relaxed text-slate-100">{result.sql}</pre>
+              {result.repaired && <p className="mb-1 text-xs text-muted">The first SQL failed; this is the corrected version.</p>}
+              <pre className="overflow-auto rounded-xl bg-code p-4 font-mono text-xs leading-relaxed text-code-ink">{result.sql}</pre>
             </>
           )}
         </div>
       )}
-      <div className="flex items-center justify-between text-xs text-slate-500">
+      <div className="flex items-center justify-between text-xs text-muted">
         <span>
           {result.provider} / {result.model} · {((result.timings.total_ms ?? 0) / 1000).toFixed(1)} s
           {result.tokens_in != null && ` · ${result.tokens_in.toLocaleString()} in / ${(result.tokens_out ?? 0).toLocaleString()} out tokens`}
         </span>
         <span className="flex items-center gap-1">
           {rated && <span className="mr-1">Thanks!</span>}
-          <button onClick={() => rate('up')} className={cn('rounded p-1 hover:bg-slate-100', rated === 'up' && 'text-emerald-600')} title="Helpful">
+          <button onClick={() => rate('up')} className={cn('rounded p-1 hover:bg-surface-3', rated === 'up' && 'text-tone-ok')} title="Helpful">
             <ThumbsUp className="size-4" />
           </button>
-          <button onClick={() => rate('down')} className={cn('rounded p-1 hover:bg-slate-100', rated === 'down' && 'text-red-600')} title="Not helpful">
+          <button onClick={() => rate('down')} className={cn('rounded p-1 hover:bg-surface-3', rated === 'down' && 'text-tone-bad')} title="Not helpful">
             <ThumbsDown className="size-4" />
           </button>
         </span>
       </div>
       {latest && result.followups.length > 0 && (
         <div>
-          <div className="mb-1.5 text-xs font-semibold uppercase tracking-wide text-slate-500">Ask next</div>
+          <div className="mb-1.5 text-xs font-semibold uppercase tracking-wide text-muted">Ask next</div>
           <div className="flex flex-wrap gap-2">
             {result.followups.map((f) => (
               <button
                 key={f}
                 onClick={() => onAsk(f)}
-                className="rounded-full border border-brand-200 bg-brand-50 px-3 py-1.5 text-left text-sm text-brand-700 hover:bg-brand-100"
+                className="rounded-full border border-brand-edge bg-brand-soft px-3 py-1.5 text-left text-sm text-brand-text hover:bg-brand-soft-2"
               >
                 {f}
               </button>
@@ -140,6 +141,7 @@ export default function AskPage() {
   const { dataset } = useSettings()
   const { provider, model, providers } = useModel()
   const [history, setHistory] = useState<Entry[]>([])
+  const savedQuestions = useSavedQuestions()
   const [text, setText] = useState('')
   const [compare, setCompare] = useState(false)
   const others = providers.filter((p) => p.name !== provider?.name)
@@ -158,11 +160,17 @@ export default function AskPage() {
     const secondSpec = others.find((p) => p.name === second) ?? others[0]
     if (compare && secondSpec) targets.push({ provider: secondSpec.name, model: secondSpec.default_model })
     const index = history.length
+    // Earlier exchanges of this thread (last three that produced SQL) give follow-ups their context.
+    const thread: AskTurn[] = history
+      .map((entry) => entry.results.find(isAnswer))
+      .filter((r): r is AskResult => !!r && !!r.sql)
+      .map((r) => ({ question: r.question, sql: r.sql }))
+      .slice(-3)
     setHistory((h) => [...h, { question, results: [], loading: true }])
     setText('')
     const results = await Promise.all(
       targets.map((t) =>
-        api.ask({ question, provider: t.provider, model: t.model, dataset }).catch((e: Error) => ({
+        api.ask({ question, provider: t.provider, model: t.model, dataset, history: thread }).catch((e: Error) => ({
           error: e.message,
           provider: t.provider,
           model: t.model,
@@ -193,7 +201,7 @@ export default function AskPage() {
           {compare && (
             <select value={second} onChange={(e) => setSecond(e.target.value)} className="rounded-lg bg-white/15 px-2 py-1 text-white">
               {others.map((p) => (
-                <option key={p.name} value={p.name} className="text-slate-900">
+                <option key={p.name} value={p.name} className="text-ink">
                   {p.label}
                   {p.configured ? '' : ' (no key)'}
                 </option>
@@ -211,12 +219,35 @@ export default function AskPage() {
       {!providers.some((p) => p.configured) && <Notice tone="warn">No model API key is configured, so questions cannot be answered yet.</Notice>}
 
       <div className="flex flex-col gap-5 pb-28">
+        {savedQuestions.saved.length > 0 && (
+          <div data-testid="saved-questions">
+            <p className="mb-2 flex items-center gap-1.5 text-sm font-medium text-ink-2">
+              <Star className="size-4 fill-amber-400 text-amber-400" /> Saved
+            </p>
+            <div className="flex flex-wrap gap-2">
+              {savedQuestions.saved.map((q) => (
+                <span key={q} className="inline-flex items-center gap-1 rounded-full border border-line bg-surface pl-3 pr-1 text-sm shadow-sm">
+                  <button onClick={() => ask(q)} className="py-1.5 text-left text-ink-2 hover:text-brand-text">
+                    {q}
+                  </button>
+                  <button
+                    onClick={() => savedQuestions.remove(q)}
+                    aria-label={`Remove saved question: ${q}`}
+                    className="rounded-full p-1 text-faint hover:bg-surface-3 hover:text-ink"
+                  >
+                    <X className="size-3.5" />
+                  </button>
+                </span>
+              ))}
+            </div>
+          </div>
+        )}
         {history.length === 0 && (
           <div>
-            <p className="mb-3 text-sm font-medium text-slate-600">Try one of these:</p>
+            <p className="mb-3 text-sm font-medium text-ink-2">Try one of these:</p>
             <div className="grid grid-cols-1 gap-3 md:grid-cols-3">
               {EXAMPLES.map((e) => (
-                <button key={e} onClick={() => ask(e)} className="rounded-xl border border-slate-200 bg-white px-4 py-3 text-left text-sm shadow-sm hover:border-brand-200 hover:bg-brand-50">
+                <button key={e} onClick={() => ask(e)} className="rounded-xl border border-line bg-surface px-4 py-3 text-left text-sm shadow-sm hover:border-brand-edge hover:bg-brand-soft">
                   {e}
                 </button>
               ))}
@@ -225,7 +256,18 @@ export default function AskPage() {
         )}
         {history.map((entry, i) => (
           <div key={i} className="flex flex-col gap-3">
-            <div className="self-end rounded-2xl rounded-br-sm bg-brand-600 px-4 py-2.5 text-sm text-white shadow-sm">{entry.question}</div>
+            <div className="flex items-center justify-end gap-2">
+              <button
+                onClick={() => savedQuestions.toggle(entry.question)}
+                aria-label={savedQuestions.isSaved(entry.question) ? 'Remove from saved questions' : 'Save this question'}
+                aria-pressed={savedQuestions.isSaved(entry.question)}
+                title={savedQuestions.isSaved(entry.question) ? 'Saved' : 'Save question'}
+                className="rounded-full p-1.5 text-faint hover:bg-surface-3 hover:text-amber-500"
+              >
+                <Star className={cn('size-4', savedQuestions.isSaved(entry.question) && 'fill-amber-400 text-amber-400')} />
+              </button>
+              <div className="rounded-2xl rounded-br-sm bg-brand-600 px-4 py-2.5 text-sm text-white shadow-sm">{entry.question}</div>
+            </div>
             <Card>
               {entry.loading ? (
                 <Spinner label="Writing SQL, running it and reading the result…" />
@@ -235,7 +277,7 @@ export default function AskPage() {
                 <div className="grid grid-cols-1 gap-6 xl:grid-cols-2">
                   {entry.results.map((r, n) => (
                     <div key={n}>
-                      <div className="mb-2 text-xs font-bold uppercase tracking-wide text-brand-700">
+                      <div className="mb-2 text-xs font-bold uppercase tracking-wide text-brand-text">
                         {r.provider} / {r.model}
                       </div>
                       <Result result={r} question={entry.question} latest={i === history.length - 1 && n === 0} onAsk={ask} />
@@ -254,13 +296,13 @@ export default function AskPage() {
           e.preventDefault()
           ask(text)
         }}
-        className="fixed bottom-5 left-72 right-8 flex gap-2 rounded-2xl border border-slate-200 bg-white p-2 shadow-lg"
+        className="fixed bottom-4 left-4 right-4 flex gap-2 rounded-2xl border border-line bg-surface p-2 shadow-lg sm:left-6 sm:right-6 lg:bottom-5 lg:left-72 lg:right-8"
       >
         <input
           value={text}
           onChange={(e) => setText(e.target.value)}
           placeholder="Ask about incidents, SLAs, teams or changes…"
-          className="flex-1 rounded-xl px-3 py-2 text-sm outline-none"
+          className="min-w-0 flex-1 rounded-xl bg-transparent px-3 py-2 text-sm text-ink outline-none placeholder:text-faint"
         />
         <Button variant="primary" type="submit" disabled={!text.trim()}>
           <Send className="size-4" /> Ask

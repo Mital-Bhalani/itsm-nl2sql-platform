@@ -16,7 +16,7 @@ import {
   XAxis,
   YAxis,
 } from 'recharts'
-import { Card, CardTitle, ErrorBox, Input, PageHeader, RISK_COLORS, STATUS_COLORS, Select, Spinner, Stat, PRIORITY_COLORS } from '@/components/ui'
+import { Card, CardTitle, ErrorBox, Input, PageHeader, RISK_COLORS, STATUS_COLORS, Select, Spinner, Stat, PRIORITY_COLORS, TOOLTIP } from '@/components/ui'
 import { api, type Kpis, type MonthRow } from '@/lib/api'
 import { useSettings } from '@/lib/settings'
 
@@ -80,7 +80,7 @@ export default function DashboardPage() {
       <PageHeader title="Service dashboard" subtitle="SLA performance, workload and change risk across every team." />
 
       <Card className="mb-5 flex flex-wrap items-end gap-4">
-        <label className="flex items-center gap-2 pb-2 text-sm font-medium text-slate-700">
+        <label className="flex items-center gap-2 pb-2 text-sm font-medium text-ink-2">
           <input type="checkbox" checked={useDates} onChange={(e) => setUseDates(e.target.checked)} className="size-4 accent-brand-600" />
           Filter by date opened
         </label>
@@ -109,7 +109,7 @@ export default function DashboardPage() {
         <Stat label="MTTR" value={`${h.mttr_hours ?? 0} h`} delta={delta('mttr_hours')} deltaNote={note && `h ${note}`} lowerIsBetter spark={spark('mttr_hours')} />
         <Stat label="Reopen rate" value={`${h.reopen_rate_pct ?? 0}%`} delta={delta('reopen_rate_pct')} deltaNote={note && `pts ${note}`} lowerIsBetter spark={spark('reopen_rate_pct')} />
       </div>
-      <p className="mb-5 mt-2 text-xs text-slate-500">
+      <p className="mb-5 mt-2 text-xs text-muted">
         As of {data.as_of}. Sparklines show the monthly trend{note && `; arrows compare ${note}, green = better`}. Breach = resolution time over the
         priority's SLA target (wall-clock).
       </p>
@@ -123,7 +123,7 @@ export default function DashboardPage() {
                   <button
                     key={m}
                     onClick={() => setMeasure(m)}
-                    className={`rounded-md px-2 py-1 text-xs font-medium ${measure === m ? 'bg-brand-600 text-white' : 'bg-slate-100 text-slate-600'}`}
+                    className={`rounded-md px-2 py-1 text-xs font-medium ${measure === m ? 'bg-brand-600 text-white' : 'bg-surface-3 text-ink-2'}`}
                   >
                     {m === 'sla_breaches' ? 'Count' : 'Rate %'}
                   </button>
@@ -135,10 +135,10 @@ export default function DashboardPage() {
           </CardTitle>
           <ResponsiveContainer width="100%" height={260}>
             <BarChart data={[...data.by_team].sort((a, b) => b[measure] - a[measure])} layout="vertical" margin={{ left: 20, right: 20 }}>
-              <CartesianGrid strokeDasharray="3 3" stroke="#e2e8f0" horizontal={false} />
+              <CartesianGrid strokeDasharray="3 3" stroke="var(--chart-grid)" horizontal={false} />
               <XAxis type="number" />
               <YAxis type="category" dataKey="team" width={140} />
-              <Tooltip />
+              <Tooltip {...TOOLTIP} />
               <Bar isAnimationActive={false}
                 dataKey={measure}
                 name={measure === 'sla_breaches' ? 'Breaches' : 'Breach rate %'}
@@ -149,13 +149,13 @@ export default function DashboardPage() {
               />
             </BarChart>
           </ResponsiveContainer>
-          <p className="text-xs text-slate-500">Click a bar to open that team's incidents. Count and rate can rank teams differently.</p>
+          <p className="text-xs text-muted">Click a bar to open that team's incidents. Count and rate can rank teams differently.</p>
         </Card>
 
         <Card className="overflow-x-auto">
           <CardTitle>Team scorecard</CardTitle>
           <table className="w-full text-sm [&_td]:px-2 [&_th]:px-2 [&_th]:whitespace-nowrap">
-            <thead className="text-left text-xs uppercase tracking-wide text-slate-500">
+            <thead className="text-left text-xs uppercase tracking-wide text-muted">
               <tr>
                 <th className="py-1.5">Team</th>
                 <th>Open</th>
@@ -164,15 +164,15 @@ export default function DashboardPage() {
                 <th>MTTR h</th>
               </tr>
             </thead>
-            <tbody className="divide-y divide-slate-100">
+            <tbody className="divide-y divide-line-soft">
               {data.by_team.map((t) => (
-                <tr key={t.team} onClick={() => openTeam(t.team)} className="cursor-pointer hover:bg-brand-50">
-                  <td className="whitespace-nowrap py-2 font-medium text-slate-800">{t.team}</td>
+                <tr key={t.team} onClick={() => openTeam(t.team)} className="cursor-pointer hover:bg-brand-soft">
+                  <td className="whitespace-nowrap py-2 font-medium text-ink">{t.team}</td>
                   <td>{t.open}</td>
                   <td>{t.sla_breaches}</td>
                   <td>
                     <div className="flex items-center gap-2">
-                      <div className="h-2 w-12 shrink-0 overflow-hidden rounded-full bg-slate-100">
+                      <div className="h-2 w-12 shrink-0 overflow-hidden rounded-full bg-surface-3">
                         <div
                           className="h-full rounded-full"
                           style={{ width: `${Math.min(100, (t.sla_breach_rate_pct / 40) * 100)}%`, background: t.sla_breach_rate_pct > 20 ? '#DC2626' : '#4F46E5' }}
@@ -193,11 +193,11 @@ export default function DashboardPage() {
         <CardTitle>Monthly trend (by month opened)</CardTitle>
         <ResponsiveContainer width="100%" height={280}>
           <ComposedChart data={months} margin={{ right: 10 }}>
-            <CartesianGrid strokeDasharray="3 3" stroke="#e2e8f0" />
+            <CartesianGrid strokeDasharray="3 3" stroke="var(--chart-grid)" />
             <XAxis dataKey="month" />
             <YAxis yAxisId="left" />
             <YAxis yAxisId="right" orientation="right" unit="%" />
-            <Tooltip />
+            <Tooltip {...TOOLTIP} />
             <Legend />
             <Bar isAnimationActive={false} yAxisId="left" dataKey="incidents" name="Incidents" fill="#C7D2FE" radius={[6, 6, 0, 0]} />
             <Line isAnimationActive={false} yAxisId="right" dataKey="sla_breach_rate_pct" name="Breach rate %" stroke="#DC2626" strokeWidth={2.5} dot={{ r: 4 }} />
@@ -210,10 +210,10 @@ export default function DashboardPage() {
           <CardTitle>By priority</CardTitle>
           <ResponsiveContainer width="100%" height={230}>
             <BarChart data={data.by_priority}>
-              <CartesianGrid strokeDasharray="3 3" stroke="#e2e8f0" vertical={false} />
+              <CartesianGrid strokeDasharray="3 3" stroke="var(--chart-grid)" vertical={false} />
               <XAxis dataKey="priority" />
               <YAxis />
-              <Tooltip />
+              <Tooltip {...TOOLTIP} />
               <Bar isAnimationActive={false} dataKey="incidents" name="Incidents" radius={[6, 6, 0, 0]}>
                 {data.by_priority.map((p) => (
                   <ChartCell key={p.priority} fill={PRIORITY_COLORS[Number(p.priority.slice(1))]} />
@@ -231,7 +231,7 @@ export default function DashboardPage() {
                   <ChartCell key={s.status} fill={STATUS_COLORS[s.status] ?? '#94A3B8'} />
                 ))}
               </Pie>
-              <Tooltip />
+              <Tooltip {...TOOLTIP} />
               <Legend iconSize={10} wrapperStyle={{ fontSize: 12 }} />
             </PieChart>
           </ResponsiveContainer>
@@ -239,14 +239,14 @@ export default function DashboardPage() {
         <Card>
           <CardTitle>Upcoming changes by risk</CardTitle>
           {data.upcoming_changes_by_risk.length === 0 ? (
-            <p className="text-sm text-slate-500">No open changes planned after the as-of date.</p>
+            <p className="text-sm text-muted">No open changes planned after the as-of date.</p>
           ) : (
             <ResponsiveContainer width="100%" height={230}>
               <BarChart data={data.upcoming_changes_by_risk}>
-                <CartesianGrid strokeDasharray="3 3" stroke="#e2e8f0" vertical={false} />
+                <CartesianGrid strokeDasharray="3 3" stroke="var(--chart-grid)" vertical={false} />
                 <XAxis dataKey="risk" />
                 <YAxis allowDecimals={false} />
-                <Tooltip />
+                <Tooltip {...TOOLTIP} />
                 <Bar isAnimationActive={false} dataKey="changes" name="Changes" radius={[6, 6, 0, 0]}>
                   {data.upcoming_changes_by_risk.map((c) => (
                     <ChartCell key={c.risk} fill={RISK_COLORS[c.risk]} />

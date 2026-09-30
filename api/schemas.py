@@ -5,8 +5,16 @@ from typing import Any, Literal
 from pydantic import BaseModel, Field
 
 
+class HistoryTurn(BaseModel):
+    """One earlier exchange, so a follow-up like 'and by priority?' has context."""
+    question: str = Field(min_length=1, max_length=500)
+    sql: str | None = Field(default=None, max_length=5000)
+
+
 class AskRequest(BaseModel):
     question: str = Field(min_length=3, max_length=500)
+    history: list[HistoryTurn] = Field(default=[], max_length=5,
+                                       description="previous questions (and their SQL) of this conversation, newest last")
     provider: str | None = Field(default=None, description="openai or anthropic")
     model: str | None = Field(default=None, max_length=100)
     dataset: str = "default"

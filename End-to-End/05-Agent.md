@@ -40,8 +40,9 @@ flowchart TD
 | `_denial()` / `_authorizer()` | The SQLite **allow-list**: only select, read, function calls and recursion are permitted; `users.name` and `load_extension` are refused |
 | `run_sql(conn, sql)` | Runs SQL with the authorizer and a **5-second timeout** (progress handler); returns at most **1,000 rows**; turns denials into `UnsafeSQL` with a clear reason |
 | `resolve_terms(conn, question)` | Tries every 1–4-word phrase, longest first, against `find_term()` |
-| `build_context(conn, resolved)` | The system prompt: fixed rules ("today is 2026-09-28", SQLite dialect, one SELECT, never `users.name`, table aliases, team-join rule, assumption comment) followed by every table, column, join, metric and answerable glossary term from the catalog |
+| `build_context(conn, resolved)` | The system prompt: fixed rules ("today is" the catalog's as-of date, the dialect, one SELECT, never `users.name`, table aliases, team-join rule, "open = New, In Progress and On Hold", follow-up rule, assumption comment) followed by every table, column, join, metric and answerable glossary term from the catalog |
 | `call_model()` | One call through `llm.complete()` |
+| `with_history(question, history)` | The user message: the last 3 `{question, sql}` turns of the conversation under "CONVERSATION SO FAR", then the new question. History goes in the user message so the system prompt (the catalog) stays identical and the provider's prompt cache hits (measured: about 4,200 of 4,400 prompt tokens cached on OpenAI) |
 | `extract_sql(text)` | Pulls the SQL out of the reply's code block and the `-- assumption:` line |
 | `guard_sql(sql)` | Rejects empty SQL, more than one statement, anything not starting with SELECT/WITH, and write/admin keywords (strings are ignored when checking); appends `LIMIT 1000` if missing |
 | `translate(question, …)` | Terms → refusal check → context → AI → SQL (no execution). Returns `{terms, refusal, sql, assumption, unsafe, provider, model, tokens…}` |

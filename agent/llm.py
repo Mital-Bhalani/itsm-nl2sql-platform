@@ -22,6 +22,7 @@ callers can tell "the model could not be reached" apart from "the SQL was wrong"
 
 import os
 import re
+import threading
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -53,6 +54,7 @@ class LLMReply:
     latency_ms: int
     tokens_in: int | None = None
     tokens_out: int | None = None
+    tokens_cached: int | None = None  # prompt tokens served from the provider's prompt cache
 
 
 # -----------------------------------------------------------------------------
@@ -128,21 +130,69 @@ def redact(text):
 # -----------------------------------------------------------------------------
 #  Provider calls
 # -----------------------------------------------------------------------------
+# One SDK client per provider, built on first use and kept: the client owns the HTTP connection
+# pool, so reusing it saves a TLS handshake per question (the first call after a start was
+# measured at 50 s once; later calls take about 5 s).
+_clients: dict[str, object] = {}
+_clients_lock = threading.Lock()
+
+
+def _client(provider):
+    with _clients_lock:
+        client = _clients.get(provider)
+        if client is None:
+            if provider == "openai":
+                import openai
+                client = openai.OpenAI(timeout=TIMEOUT_SECONDS, max_retries=MAX_RETRIES)
+            else:
+                import anthropic
+                client = anthropic.Anthropic(timeout=TIMEOUT_SECONDS, max_retries=MAX_RETRIES)
+            _clients[provider] = client
+        return client
+
+
+def reset_clients():
+    """Drop the cached SDK clients (after a key change, or in tests)."""
+    with _clients_lock:
+        _clients.clear()
+
+
+def warm_up(provider=None):
+    """
+    Import the SDK, build the client and open one connection to the provider (a cheap model
+    lookup, no tokens) so the first real question does not pay the cold-start cost. Best effort:
+    returns True when the provider answered, False otherwise; never raises.
+    """
+    load_env()
+    provider = (provider or default_provider()).strip().lower()
+    try:
+        spec = _spec(provider)
+        if not os.getenv(spec["key"]):
+            return False
+        client = _client(provider)
+        client.with_options(timeout=15).models.retrieve(default_model(provider))
+        return True
+    except Exception:  # noqa: BLE001 - warm-up must never break the caller
+        return False
+
+
 def _call_openai(system, user, model):
     try:
         import openai
     except ModuleNotFoundError as exc:
         raise AgentAPIError("The 'openai' package is not installed: pip install -r requirements.txt") from exc
     try:
-        client = openai.OpenAI(timeout=TIMEOUT_SECONDS, max_retries=MAX_RETRIES)
+        client = _client("openai")
         reply = client.chat.completions.create(
             model=model, temperature=0,
             messages=[{"role": "system", "content": system}, {"role": "user", "content": user}])
     except openai.OpenAIError as exc:
         raise AgentAPIError(f"{type(exc).__name__}: {redact(exc)}") from exc
     usage = reply.usage
+    details = getattr(usage, "prompt_tokens_details", None) if usage else None
+    cached = getattr(details, "cached_tokens", None) if details else None
     return (reply.choices[0].message.content or "",
-            usage.prompt_tokens if usage else None, usage.completion_tokens if usage else None)
+            usage.prompt_tokens if usage else None, usage.completion_tokens if usage else None, cached)
 
 
 def _call_anthropic(system, user, model):
@@ -151,7 +201,7 @@ def _call_anthropic(system, user, model):
     except ModuleNotFoundError as exc:
         raise AgentAPIError("The 'anthropic' package is not installed: pip install -r requirements.txt") from exc
     try:
-        client = anthropic.Anthropic(timeout=TIMEOUT_SECONDS, max_retries=MAX_RETRIES)
+        client = _client("anthropic")
         # The system prompt (the whole semantic catalog) is identical across questions, so it
         # is marked for prompt caching. Current Claude models take no temperature; effort
         # controls how much they think. If a safety classifier declines, the server-side
@@ -167,7 +217,8 @@ def _call_anthropic(system, user, model):
     if reply.stop_reason == "refusal":
         raise AgentAPIError("The model declined to answer (stop_reason = refusal).")
     text = "".join(block.text for block in reply.content if block.type == "text")
-    return text, reply.usage.input_tokens, reply.usage.output_tokens
+    cached = getattr(reply.usage, "cache_read_input_tokens", None)
+    return text, reply.usage.input_tokens, reply.usage.output_tokens, cached
 
 
 CALLERS = {"openai": _call_openai, "anthropic": _call_anthropic}
@@ -178,10 +229,10 @@ def _complete_once(system, user, provider, model):
     if not os.getenv(spec["key"]):
         raise AgentAPIError(f"{spec['key']} is not set (add it to .env) - {spec['label']} unavailable.")
     started = time.perf_counter()
-    text, tokens_in, tokens_out = CALLERS[provider](system, user, model)
+    text, tokens_in, tokens_out, tokens_cached = CALLERS[provider](system, user, model)
     return LLMReply(text=text, provider=provider, model=model,
                     latency_ms=round((time.perf_counter() - started) * 1000),
-                    tokens_in=tokens_in, tokens_out=tokens_out)
+                    tokens_in=tokens_in, tokens_out=tokens_out, tokens_cached=tokens_cached)
 
 
 def complete(system, user, provider=None, model=None):

@@ -18,7 +18,7 @@ def fake_caller(name, fail=False):
     def call(system, user, model):
         if fail:
             raise llm.AgentAPIError(f"{name} down")
-        return f"{name}:{model}", 3, 2
+        return f"{name}:{model}", 3, 2, None
     return call
 
 

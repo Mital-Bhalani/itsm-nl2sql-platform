@@ -1,4 +1,4 @@
-# 12. Operations: set up, run, configure, maintain
+# 11. Operations: set up, run, configure, maintain
 
 ## First-time setup
 
@@ -10,15 +10,16 @@ cp .env.example .env                 # then set OPENAI_API_KEY (and ANTHROPIC_AP
 python db/seed.py                    # build db/tickets.sqlite
 python semantics/build_catalog.py    # add the meta_* catalog (always after seeding)
 cd web && npm install && npm run build && cd ..    # optional: the React UI
-python -B -m pytest tests -p no:cacheprovider      # 69 tests, no API key needed
-python evals/run_evals.py --self-test              # expect 15/15
+python -B -m pytest tests -p no:cacheprovider      # 83 tests, no API key needed
+python evals/run_evals.py --self-test              # expect 51/51
+cd web && npm run e2e && cd ..                     # 22 Playwright checks in Edge (starts its own API on 8010)
 ```
 
 ## Running
 
 | What | Command | Open |
 |---|---|---|
-| Everything | `python run_app.py` | React `http://127.0.0.1:8000/web/`, Streamlit `http://localhost:8501`, API docs `http://127.0.0.1:8000/docs` |
+| Everything | `python run_app.py` | React `http://127.0.0.1:8000/web/`, API docs `http://127.0.0.1:8000/docs` |
 | API only | `uvicorn api.main:app --port 8000` | `/docs`, `/web/` |
 | React in development | `cd web && npm run dev` (with the API running) | `http://localhost:5173` |
 | One question, no UI | `python agent/nl2sql.py "how many P1 incidents are open?"` | terminal |
@@ -43,10 +44,9 @@ address requires `APP_API_KEY`). Ctrl+C stops both servers.
 | `LLM_ALLOWED_MODELS` | — | Extra models the API may be asked for (`model` or `provider:model`, comma-separated) |
 | `APP_API_KEY` | — | Required `X-API-Key` on `/api/*` when set |
 | `RATE_LIMIT_PER_MIN` | 30 | Per client IP, per bucket |
-| `CORS_ORIGINS` | Streamlit URLs | Allowed browser origins |
+| `CORS_ORIGINS` | `localhost:5173` | Allowed browser origins (Vite dev server; the built UI needs none) |
 | `DB_PATH`, `DB_LARGE_PATH` | `db/…` | Dataset files |
 | `AUDIT_LOG` | `logs/audit.jsonl` | Audit file |
-| `API_URL` | `http://127.0.0.1:8000` | Where Streamlit finds the API (`run_app.py` sets it) |
 | `VITE_APP_API_KEY` | — | Build-time key for the React bundle (internal use only) |
 
 ## Claude Code commands and skill (`.claude/`)
@@ -70,7 +70,6 @@ verified facts, history of fixes and open items.
 | Change the sample data | Edit `db/seed.py` → reseed → rebuild catalog → `python evals/make_golden_set.py` → self-test |
 | Add an API endpoint | `api/main.py` (+ `services.py`, `schemas.py`) → test in `tests/test_api.py` → `web/src/lib/api.ts` → page |
 | Add a React page | `web/src/pages/New.tsx` → route in `App.tsx` → link in `components/Layout.tsx` → `npm run build` |
-| Add a Streamlit page | `ui/pages/8_Name.py` using `api_client.setup/sidebar/get` |
 | Before every push (public repo) | Tests pass; no `__pycache__`; staged diff scanned for keys and employer/client names; never commit `.env` or `*.sqlite` |
 
 ## Troubleshooting
@@ -82,12 +81,14 @@ verified facts, history of fixes and open items.
 | `OPENAI_API_KEY is not set` | Add it to `.env` (the account needs API credit) |
 | `OpenAI() got an unexpected keyword argument 'proxies'` | Keep `httpx==0.27.2` while `openai` is 1.51.2 |
 | React page shows old content | Rebuild (`npm run build`) and hard-refresh (Ctrl+F5) |
-| Streamlit keeps showing old numbers | Sidebar **Refresh from database** (the UI caches for 10 seconds) |
+| React shows old numbers | Sidebar **Refresh from database** (the UI caches for 10 seconds) |
 | `Model '…' is not enabled on this server` | Add it to `LLM_ALLOWED_MODELS` |
 | Evals differ from run to run | Normal in small amounts; run the whole set more than once before concluding |
 
 ## Open items
 
-See the "Open items / next steps" section of `CLAUDE.md`: grow the golden set, score
-Anthropic live, settle the flagged ambiguities (Resolved vs Closed), Docker/CI, user accounts,
-and replacing the fixed "today" with the real clock when real data is connected.
+See the "Open items / next steps" section of `CLAUDE.md`: score Anthropic live, settle the
+flagged ambiguities (Resolved vs Closed), Docker, user accounts, and running the PostgreSQL
+dialect against a real server. The fixed "today" is now a build setting (`AS_OF=today python
+semantics/build_catalog.py`), rate limits and eval jobs live in `logs/state.sqlite` (`STATE_DB`)
+so several API processes share them, and CI runs on GitHub Actions.

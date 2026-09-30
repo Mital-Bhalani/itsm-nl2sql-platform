@@ -12,6 +12,7 @@ calls the agent; both front ends go through it. Interactive documentation is at
 | `services.py` | The data logic behind the non-AI endpoints; no AI involved |
 | `schemas.py` | Pydantic models that validate requests and shape responses |
 | `config.py` | `Settings` loaded once from the environment and `.env`; puts `agent/`, `semantics/`, `evals/` on the import path |
+| `state.py` | `StateStore`: rate-limit windows and eval runs in one SQLite file (`STATE_DB`), safe across threads, workers and restarts; `question_history()` turns stored runs into per-question pass rates |
 
 ## Endpoints
 
@@ -34,8 +35,9 @@ Every `/api/*` endpoint takes `dataset=default|large` and needs the `X-API-Key` 
 | GET | `/api/catalog/{section}` | `tables`, `columns`, `joins`, `metrics` or `glossary` | Catalog |
 | GET | `/api/reconcile` | 25 checks: every number the UI shows vs the same number from independent SQL | Data check |
 | POST | `/api/sql` | Your own read-only SELECT through the same guardrails (rate-limited, audited) | Data check |
-| POST | `/api/evals` | Start an eval run (self-test or live) in a background thread (rate-limited, max 2 at once) | Evals |
-| GET | `/api/evals`, `/api/evals/{id}` | List runs / progress and results of one run | Evals |
+| POST | `/api/evals` | Start an eval run (self-test or live) in a background thread (rate-limited, max 2 at once across all workers) | Evals |
+| GET | `/api/evals`, `/api/evals/{id}` | List past and running runs (persisted) / progress and results of one run | Evals |
+| GET | `/api/evals/history` | For one golden set: the finished runs and, per question, runs, passes, pass rate, latest status and each failure; flakiest questions first | Evals |
 | GET | `/web/…` | The built React site (`web/dist`) | Browser |
 | GET | `/` | Redirects to `/web/` (or `/docs` if React is not built) | Browser |
 
@@ -77,7 +79,14 @@ flowchart LR
   (details in the server log, never a stack trace to the client).
 - **Audit log**: every ask, SQL console query and feedback is one JSON line: time, request id,
   client, dataset, question/SQL, provider, model, status, row count, tokens, timings.
-- **Eval jobs** live in memory (max 50 remembered, max 2 running), each in its own thread.
+- **Eval jobs** run in a thread each and are written to the state store when created, after
+  every 5 scored questions and when finished (newest 200 kept, max 2 running). A restart no
+  longer loses history, and a job stuck in `running` for 30 minutes is closed as failed.
+- **Conversation memory**: `/api/ask` accepts `history` (up to 5 earlier `{question, sql}`
+  turns); the agent adds them to the user message so a follow-up such as "and by priority?"
+  keeps the earlier subject.
+- **Warm-up**: at start-up the provider SDK client is created in a background thread
+  (`llm.warm_up()`), so the first real question does not pay the import and connection cost.
 
 ## Settings (`config.py` and environment)
 
@@ -85,10 +94,11 @@ flowchart LR
 |---|---|---|
 | `APP_API_KEY` | *(empty)* | When set, required as `X-API-Key` on `/api/*` |
 | `RATE_LIMIT_PER_MIN` | 30 | Per client IP, per bucket (ask, sql, evals, feedback) |
-| `CORS_ORIGINS` | Streamlit URLs | Browser origins allowed to call the API from another port |
+| `CORS_ORIGINS` | Vite dev server (`localhost:5173`) | Browser origins allowed to call the API from another port; the built React UI is same-origin and needs none |
 | `DB_PATH` / `DB_LARGE_PATH` | `db/tickets.sqlite` / `db/tickets_large.sqlite` | The two datasets |
 | `AUDIT_LOG` | `logs/audit.jsonl` | Audit file |
+| `STATE_DB` | `logs/state.sqlite` | Shared state: rate-limit windows and eval-run history |
 | `LLM_*`, `OPENAI_*`, `ANTHROPIC_*` | see chapter 5 | Model providers |
 
-Start it on its own with `uvicorn api.main:app --port 8000`, or with the UI via
-`python run_app.py`.
+Start it with `uvicorn api.main:app --port 8000` or `python run_app.py` (same thing plus
+start-up checks); the built React UI is served by this process at `/web/`.

@@ -15,7 +15,7 @@ import pytest
 
 sys.dont_write_bytecode = True
 ROOT = Path(__file__).resolve().parent.parent
-for folder in ("", "agent", "semantics", "evals"):
+for folder in ("", "agent", "semantics", "evals", "db"):
     path = str(ROOT / folder) if folder else str(ROOT)
     if path not in sys.path:
         sys.path.insert(0, path)
@@ -35,6 +35,7 @@ def api_app(db_path, tmp_path_factory):
     """The FastAPI app pointed at the temp database, with no API key and a temp audit log."""
     os.environ.update(DB_PATH=str(db_path), DB_LARGE_PATH=str(db_path.parent / "absent.sqlite"),
                       AUDIT_LOG=str(tmp_path_factory.mktemp("logs") / "audit.jsonl"),
+                      STATE_DB=str(tmp_path_factory.mktemp("state") / "state.sqlite"),
                       RATE_LIMIT_PER_MIN="1000")
     os.environ.pop("APP_API_KEY", None)
     from api import main

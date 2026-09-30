@@ -22,15 +22,19 @@ Endpoints (JSON; interactive docs at /docs):
     GET  /api/reconcile                every number the UI shows vs the same number in SQL
     POST /api/sql                      run your own read-only SELECT (same guardrails)
     POST /api/evals                    start an eval run (self-test or live)
+    GET  /api/evals                    past and running eval runs (kept in STATE_DB)
+    GET  /api/evals/history            per-question pass rates across runs of one golden set
     GET  /api/evals/{job_id}           progress and results of an eval run
 
 Security: read-only database with an allow-list authorizer and size limits, SELECT-only guarded
 SQL capped at 1,000 rows, users.name masked/blocked, optional X-API-Key (APP_API_KEY), per-IP
 rate limits on /api/ask, /api/sql, /api/evals and /api/feedback, at most MAX_RUNNING_JOBS eval
 runs at once, models limited to llm.allowed_models(), provider errors with API keys redacted,
-browser security headers, every question audited to logs/audit.jsonl.
+browser security headers, every question audited to logs/audit.jsonl. Rate-limit windows and
+eval runs live in api/state.py (SQLite, STATE_DB), so they hold across workers and restarts.
 """
 
+import inspect
 import json
 import logging
 import re
@@ -40,7 +44,7 @@ import sys
 import threading
 import time
 import uuid
-from collections import defaultdict, deque
+from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 
 sys.dont_write_bytecode = True  # keep the repo free of __pycache__
@@ -52,6 +56,7 @@ from fastapi.staticfiles import StaticFiles  # noqa: E402
 
 from api.config import ROOT, load_settings  # noqa: E402  (also puts agent/ etc. on sys.path)
 from api import services  # noqa: E402
+from api.state import StateStore, question_history  # noqa: E402
 from api.schemas import AskRequest, AskResponse, EvalJob, EvalRunRequest, FeedbackRequest, SqlRequest  # noqa: E402
 
 import llm  # noqa: E402
@@ -59,6 +64,8 @@ import nl2sql  # noqa: E402
 import run_evals  # noqa: E402
 
 settings = load_settings()
+state = StateStore(settings.state_db)
+ASK_TAKES_HISTORY = "history" in inspect.signature(nl2sql.ask).parameters
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s %(message)s")
 log = logging.getLogger("itsm.api")
 if not settings.api_key:
@@ -68,6 +75,30 @@ app = FastAPI(title="ITSM NL2SQL API", version=settings.version,
               description="Ask ITSM ticket questions in plain English; every answer shows its SQL.")
 app.add_middleware(CORSMiddleware, allow_origins=settings.cors_origins, allow_methods=["GET", "POST"],
                    allow_headers=["Content-Type", "X-API-Key", "X-Request-ID"])
+
+
+def _warm_up_model_client():
+    """Import the provider SDK and build its client now, so the first question is not slow."""
+    warm_up = getattr(llm, "warm_up", None)
+    if warm_up is None:
+        return
+
+    def run():
+        try:
+            warm_up()
+        except Exception:  # noqa: BLE001 - warming up must never stop the API
+            log.warning("model warm-up failed (the first question may be slower)", exc_info=True)
+
+    threading.Thread(target=run, name="llm-warm-up", daemon=True).start()
+
+
+@asynccontextmanager
+async def _lifespan(_app):
+    _warm_up_model_client()
+    yield
+
+
+app.router.lifespan_context = _lifespan
 
 
 # -----------------------------------------------------------------------------
@@ -119,30 +150,20 @@ def require_key(request: Request):
             raise HTTPException(status_code=401, detail="Missing or invalid X-API-Key header")
 
 
-_calls = defaultdict(deque)
-_calls_lock = threading.Lock()
-
-
 def limiter(bucket):
     """
     Per-client sliding-window limit of RATE_LIMIT_PER_MIN calls per minute for one bucket of
     endpoints. The client is the connecting IP address, never a request header, so changing
-    X-API-Key or other headers does not reset the count.
+    X-API-Key or other headers does not reset the count. Windows are kept in the shared state
+    store, so the limit holds across uvicorn workers.
     """
     def rate_limit(request: Request):
-        client = (bucket, request.client.host if request.client else "?")
-        now = time.monotonic()
-        with _calls_lock:
-            for key in [k for k, w in _calls.items() if not w or now - w[-1] > 60]:
-                del _calls[key]  # forget idle clients so the table cannot grow without bound
-            window = _calls[client]
-            while window and now - window[0] > 60:
-                window.popleft()
-            if len(window) >= settings.rate_limit_per_min:
-                raise HTTPException(status_code=429, detail=(
-                    f"Rate limit: {settings.rate_limit_per_min} requests per minute. Try again shortly."),
-                    headers={"Retry-After": str(int(60 - (now - window[0])) + 1)})
-            window.append(now)
+        client = request.client.host if request.client else "?"
+        allowed, retry_after = state.hit(bucket, client, settings.rate_limit_per_min)
+        if not allowed:
+            raise HTTPException(status_code=429, detail=(
+                f"Rate limit: {settings.rate_limit_per_min} requests per minute. Try again shortly."),
+                headers={"Retry-After": str(retry_after)})
     return rate_limit
 
 
@@ -203,21 +224,23 @@ async def bad_request(_request, exc):
 # -----------------------------------------------------------------------------
 @app.get("/health", tags=["meta"])
 def health():
-    datasets = {}
+    datasets, as_of = {}, None
     for name, path in settings.datasets.items():
-        state = {"path": path.name, "exists": path.exists(), "catalog": False}
+        info = {"path": path.name, "exists": path.exists(), "catalog": False}
         if path.exists():
-            state.update(services.db_info(path))
+            info.update(services.db_info(path))
             try:
                 conn = services.connect(path)
-                state["catalog"] = services.catalog_ready(conn)
+                info["catalog"] = services.catalog_ready(conn)
+                info["as_of"] = services.catalog_as_of(conn)
                 conn.close()
             except sqlite3.Error as exc:
-                state["error"] = str(exc)
-        datasets[name] = state
+                info["error"] = str(exc)
+        datasets[name] = info
     providers = llm.available_providers()
     ok = datasets["default"]["exists"] and datasets["default"]["catalog"]
-    return {"status": "ok" if ok else "degraded", "version": settings.version, "as_of": services.AS_OF,
+    as_of = datasets["default"].get("as_of") or next((d.get("as_of") for d in datasets.values() if d.get("as_of")), None)
+    return {"status": "ok" if ok else "degraded", "version": settings.version, "as_of": as_of,
             "auth_required": bool(settings.api_key), "datasets": datasets,
             "llm_ready": any(p["configured"] for p in providers), "providers": providers}
 
@@ -245,8 +268,12 @@ def ask(body: AskRequest, request: Request):
              "request_id": request_id, "client": request.client.host if request.client else None,
              "dataset": body.dataset, "question": body.question, "provider": body.provider,
              "model": body.model}
+    history = [t.model_dump() for t in body.history]
+    extra = {"history": history} if history and ASK_TAKES_HISTORY else {}
+    if history and not ASK_TAKES_HISTORY:
+        log.warning("conversation history ignored: this nl2sql.ask has no 'history' parameter")
     try:
-        result = nl2sql.ask(body.question, conn, body.provider, body.model, answer=body.answer)
+        result = nl2sql.ask(body.question, conn, body.provider, body.model, answer=body.answer, **extra)
     except llm.AgentAPIError as exc:
         message = llm.redact(exc)
         log.warning("model error request_id=%s: %s", request_id, message)
@@ -349,12 +376,11 @@ def run_sql(body: SqlRequest, request: Request):
 
 
 # -----------------------------------------------------------------------------
-#  Evals (background jobs, kept in memory)
+#  Evals (background threads; every job is persisted in the state store)
 # -----------------------------------------------------------------------------
-_jobs: dict[str, dict] = {}
-_jobs_lock = threading.Lock()
-MAX_JOBS = 50
 MAX_RUNNING_JOBS = 2  # live runs spend API credit and each holds a thread
+SAVE_EVERY = 5        # persist progress after this many scored questions
+_jobs_lock = threading.Lock()
 
 
 def _now():
@@ -366,12 +392,15 @@ def _run_eval_job(job, questions, db_path):
     try:
         conn = nl2sql.connect_readonly(db_path)
         job["status"] = "running"
+        state.save_job(job)
         for item in questions:
             result = run_evals.score(item, conn, job["mode"] == "self-test", job["provider"], job["model"])
             with _jobs_lock:
                 job["results"].append(result)
                 job["completed"] += 1
                 job["passed"] += result["status"] == "pass"
+                if job["completed"] % SAVE_EVERY == 0:
+                    state.save_job(job)
         job["execution_accuracy"] = round(job["passed"] / job["total"], 4) if job["total"] else 0.0
         job["status"] = "done"
     except llm.AgentAPIError as exc:
@@ -382,6 +411,8 @@ def _run_eval_job(job, questions, db_path):
         job.update(status="failed", error="Internal error while running the evaluation; see the server log.")
     finally:
         job["finished_at"] = _now()
+        with _jobs_lock:
+            state.save_job(job)
         if conn is not None:
             conn.close()
 
@@ -412,30 +443,42 @@ def start_eval(body: EvalRunRequest):
            "passed": 0, "execution_accuracy": None, "error": None, "started_at": _now(),
            "finished_at": None, "results": []}
     with _jobs_lock:
-        if sum(j["status"] in ("queued", "running") for j in _jobs.values()) >= MAX_RUNNING_JOBS:
+        if state.running_count(_now()) >= MAX_RUNNING_JOBS:
             raise HTTPException(status_code=429, detail=(
                 f"{MAX_RUNNING_JOBS} evaluations are already running. Wait for one to finish."))
-        if len(_jobs) >= MAX_JOBS:
-            oldest = min(_jobs.values(), key=lambda j: j["started_at"])
-            _jobs.pop(oldest["id"])
-        _jobs[job["id"]] = job
+        state.save_job(job)
     threading.Thread(target=_run_eval_job, args=(job, golden["questions"], db_path), daemon=True).start()
     return job
 
 
 @app.get("/api/evals", tags=["evals"], dependencies=[Depends(require_key)])
-def list_evals():
-    with _jobs_lock:
-        return [{k: v for k, v in j.items() if k != "results"} for j in _jobs.values()]
+def list_evals(limit: int = Query(50, ge=1, le=200)):
+    """Runs newest first, without per-question results; survives restarts (state store)."""
+    return state.list_jobs(limit=limit, now_iso=_now())
+
+
+@app.get("/api/evals/history", tags=["evals"], dependencies=[Depends(require_key)])
+def eval_history(golden: str = Query("golden_set.yaml"), limit: int = Query(20, ge=1, le=200),
+                 mode: str = Query("all", pattern=r"^(all|live|self-test)$")):
+    """
+    What the finished runs of one golden set say about each question: how often it passed,
+    its latest status and every failure (job, time, status, error). Flakiest questions first.
+    """
+    if golden not in settings.golden_sets:
+        raise HTTPException(status_code=400, detail=f"Unknown golden set '{golden}'. "
+                                                    f"Choose one of: {', '.join(settings.golden_sets)}")
+    jobs = state.finished_jobs_with_results(golden, mode)
+    runs = [{k: v for k, v in j.items() if k != "results"} for j in jobs[:limit]]
+    return {"golden": golden, "mode": mode, "runs": runs, "questions": question_history(jobs[:limit])}
 
 
 @app.get("/api/evals/{job_id}", tags=["evals"], response_model=EvalJob, dependencies=[Depends(require_key)])
 def get_eval(job_id: str):
     with _jobs_lock:
-        job = _jobs.get(job_id)
-        if job is None:
-            raise HTTPException(status_code=404, detail=f"Eval job {job_id} not found")
-        return {**job, "results": list(job["results"])}
+        job = state.get_job(job_id)
+    if job is None:
+        raise HTTPException(status_code=404, detail=f"Eval job {job_id} not found")
+    return job
 
 
 # -----------------------------------------------------------------------------

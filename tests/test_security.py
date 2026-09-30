@@ -72,11 +72,11 @@ def test_generated_sql_gets_the_same_protection(client, fake_model):
 # -----------------------------------------------------------------------------
 def test_rate_limit_ignores_changing_api_key_header(client, api_app, monkeypatch):
     monkeypatch.setattr(api_app.settings, "rate_limit_per_min", 2)
-    api_app._calls.clear()
+    api_app.state.clear_rate_hits()
     codes = [sql(client, "SELECT 1").status_code if n == 0 else
              client.post("/api/sql", json={"sql": "SELECT 1"}, headers={"X-API-Key": f"k{n}"}).status_code
              for n in range(3)]
-    api_app._calls.clear()
+    api_app.state.clear_rate_hits()
     assert codes == [200, 200, 429]
 
 
@@ -128,15 +128,3 @@ def test_eval_runs_are_capped(client, api_app, monkeypatch):
     monkeypatch.setattr(api_app, "MAX_RUNNING_JOBS", 0)
     response = client.post("/api/evals", json={"mode": "self-test"})
     assert response.status_code == 429
-
-
-# -----------------------------------------------------------------------------
-#  Streamlit HTML
-# -----------------------------------------------------------------------------
-def test_streamlit_pill_escapes_text():
-    import sys
-    from pathlib import Path
-    sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "ui"))
-    from api_client import pill
-    html = pill("<img src=x onerror=alert(1)>", "#4F46E5")
-    assert "<img" not in html and "&lt;img" in html

@@ -1,5 +1,7 @@
 # ITSM NL2SQL Platform
 
+[![CI](https://github.com/Mital-Bhalani/itsm-nl2sql-platform/actions/workflows/ci.yml/badge.svg)](https://github.com/Mital-Bhalani/itsm-nl2sql-platform/actions/workflows/ci.yml)
+
 **Ask your IT service data a question in plain English and get a checked answer back.**
 
 A service manager types *"Which teams missed their SLA most last month?"*. The app finds the
@@ -37,7 +39,7 @@ same question always gets the same, correct answer.
 
 ```mermaid
 flowchart TB
-    U["People<br/>(web browser)"] --> W["Screens<br/>React app or Streamlit app"]
+    U["People<br/>(web browser)"] --> W["Screens<br/>React app"]
     W --> API["Service layer (API)<br/>login key · rate limit · audit log"]
     API --> AG["Question answerer<br/>dictionary + safety checks"]
     AG --> LLM["AI model<br/>OpenAI or Anthropic Claude"]
@@ -57,12 +59,11 @@ column lists only what that day introduced.
 |---|---|---|---|
 | 1 | ITSM database (5 tables), deterministic synthetic data, naive "question → SQL" spike | SQLite (STRICT tables), Python standard library, OpenAI SDK | ✅ Done |
 | 2 | Semantic layer: `meta_*` catalog of columns, metrics, glossary, tables and joins, with self-checks | SQL fragments stored in SQLite (`meta_*` tables) | ✅ Done |
-| 3 | Evaluation harness: 15-question golden set, scoring, self-test, 50,000-incident large dataset | PyYAML | ✅ Done |
-| 4 | NL2SQL agent: catalog context, guardrails (read-only, SELECT-only, auto-LIMIT, PII block, timeout), one SQL repair, plain-English answers with follow-ups | OpenAI gpt-4o-mini, SQLite authorizer and progress handler | ✅ Done, 15/15 live |
+| 3 | Evaluation harness: 51-question golden set, scoring, self-test, 50,000-incident large dataset | PyYAML | ✅ Done |
+| 4 | NL2SQL agent: catalog context, guardrails (read-only, SELECT-only, auto-LIMIT, PII block, timeout), one SQL repair, plain-English answers with follow-ups | OpenAI gpt-4o-mini, SQLite authorizer and progress handler | ✅ Done, 51/51 live |
 | 5 | Multi-model: OpenAI and Anthropic Claude, switchable per question, with fallback | Anthropic SDK (Claude Opus 5.5), python-dotenv | ✅ Done |
 | 6 | HTTP API: ask, KPIs, table explorer, incidents, catalog, evals, SQL console, UI-vs-database check; API key, rate limit, audit log | FastAPI, Uvicorn, Pydantic | ✅ Done |
-| 7 | Streamlit UI: Ask, Dashboard, Explorer, Incident, Catalog, Evals, Data check | Streamlit, pandas, Altair | ✅ Done |
-| 8 | React UI with the same pages, served by the API at `/web/`; automated test suite (69 tests) | React 19, TypeScript, Vite, Tailwind CSS 4, TanStack Query, Recharts, pytest | ✅ Done |
+| 7 | React UI: Ask, Dashboard, Explorer, Incident, Catalog, Evals, Data check, served by the API at `/web/`; automated test suite (83 pytest + 22 Playwright) | React 19, TypeScript, Vite, Tailwind CSS 4, TanStack Query, Recharts, pytest | ✅ Done |
 
 ## Quick start
 
@@ -89,7 +90,7 @@ self-test); add `live` to also run the evals against the OpenAI API.
 
 ```bash
 cp .env.example .env                # set OPENAI_API_KEY (and ANTHROPIC_API_KEY for Claude)
-python run_app.py                   # API on :8000 (docs at /docs), UI on http://localhost:8501
+python run_app.py                   # API on :8000 (docs at /docs), UI on http://127.0.0.1:8000/web/
 ```
 
 The React front end (needs Node.js 20+) is built once and then served by the API:
@@ -150,7 +151,7 @@ with the same data (fixed seed 42, "today" fixed at 28 Sep 2026), and `build_cat
 be run after every seed because seeding replaces the whole file. To check a fresh setup:
 
 ```bash
-python evals/run_evals.py --self-test    # expects 15/15, no API key needed
+python evals/run_evals.py --self-test    # expects 51/51, no API key needed
 ```
 
 ## Project structure
@@ -168,12 +169,11 @@ python evals/run_evals.py --self-test    # expects 15/15, no API key needed
 │   └── naive_spike.py        # Day 1 spike: question → OpenAI → SQL, no context, no guardrails
 ├── evals/                    # golden sets, eval runner, golden-set generator
 ├── api/                      # FastAPI service (see api/README.md)
-├── ui/                       # Streamlit front end (see ui/README.md)
 ├── web/                      # React + TypeScript front end (see web/README.md)
 ├── docs/images/              # screenshots used in this README
 ├── End-to-End/               # complete guide: every folder, script and component, start to finish
 ├── tests/                    # pytest: guardrails, providers, API end to end (fake model)
-├── run_app.py                # starts the API and the UI together
+├── run_app.py                # starts the API, which also serves the React UI
 ├── CLAUDE.md                 # detailed project memory and handoff notes
 └── requirements.txt
 ```
@@ -230,8 +230,9 @@ model. Details in [api/README.md](api/README.md#safety); every known attack is a
 
 ## Tech stack
 
-Python · SQLite (portable to Postgres/Snowflake later) · OpenAI or Anthropic API at runtime ·
-FastAPI + Uvicorn · Streamlit (pandas, Altair) · React + TypeScript (Vite, Tailwind CSS,
+Python · SQLite (date expressions go through `db/dialect.py`, with a PostgreSQL variant and
+`db/schema.postgres.sql` ready but not yet run against a server) · OpenAI or Anthropic API at runtime ·
+FastAPI + Uvicorn · React + TypeScript (Vite, Tailwind CSS,
 TanStack Query, Recharts) · pytest. The per-day breakdown is in [Status](#status).
 `db/` and `semantics/` use the standard library only. `httpx` is pinned to 0.27.2 because the
 pinned `openai` 1.51.2 breaks on newer versions.
@@ -297,3 +298,9 @@ own read-only query here.
 
 **Evals** (not pictured): scores the AI on a set of test questions whose correct answers are
 known, so any drop in accuracy is caught straight away.
+
+**Light and dark**: the switch in the top-right corner of every page flips the whole app; the
+choice is remembered, and the first visit follows your operating system setting. The layout also
+adapts to tablets and phones (the sidebar becomes a menu).
+
+![Home page in dark mode](docs/images/home-dark.png)

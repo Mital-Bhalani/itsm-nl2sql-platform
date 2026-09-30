@@ -140,10 +140,10 @@ def test_api_key_required_when_configured(client, api_app, monkeypatch):
 
 def test_rate_limit(client, api_app, monkeypatch, fake_model):
     monkeypatch.setattr(api_app.settings, "rate_limit_per_min", 2)
-    api_app._calls.clear()
+    api_app.state.clear_rate_hits()
     codes = [client.post("/api/ask", json={"question": "Who is the assignee?"}).status_code for _ in range(3)]
     assert codes == [200, 200, 429]
-    api_app._calls.clear()
+    api_app.state.clear_rate_hits()
 
 
 def test_self_test_eval_job(client):
@@ -153,7 +153,7 @@ def test_self_test_eval_job(client):
         if job["status"] in ("done", "failed"):
             break
         time.sleep(0.1)
-    assert job["status"] == "done" and job["passed"] == job["total"] == 15
+    assert job["status"] == "done" and job["passed"] == job["total"] == 51
 
 
 def test_live_eval_needs_a_configured_provider(client, monkeypatch):
@@ -232,3 +232,69 @@ def test_connection_works_across_threads(db_path):
             assert pool.submit(lambda: services.groups(conn)).result()[0]["name"]
     finally:
         conn.close()
+
+
+def _wait(client, job_id, tries=200):
+    for _ in range(tries):
+        job = client.get(f"/api/evals/{job_id}").json()
+        if job["status"] in ("done", "failed"):
+            return job
+        time.sleep(0.1)
+    raise AssertionError(f"eval job {job_id} did not finish")
+
+
+def test_eval_history_across_runs(client):
+    first = client.post("/api/evals", json={"mode": "self-test"}).json()
+    _wait(client, first["id"])
+    second = client.post("/api/evals", json={"mode": "self-test"}).json()
+    _wait(client, second["id"])
+    body = client.get("/api/evals/history", params={"golden": "golden_set.yaml", "limit": 2}).json()
+    assert [r["id"] for r in body["runs"]] == [second["id"], first["id"]]
+    assert all("results" not in r for r in body["runs"])
+    assert len(body["questions"]) == body["runs"][0]["total"] >= 50
+    assert all(q["runs"] == 2 and q["pass_rate"] == 1.0 and q["last_status"] == "pass" for q in body["questions"])
+    listed = client.get("/api/evals").json()
+    assert listed[0]["id"] == second["id"] and "results" not in listed[0]
+    assert client.get("/api/evals/history", params={"golden": "nope.yaml"}).status_code == 400
+
+
+def test_eval_jobs_survive_a_restart(client, api_app):
+    from api.state import StateStore
+    job = client.post("/api/evals", json={"mode": "self-test"}).json()
+    done = _wait(client, job["id"])
+    fresh = StateStore(api_app.settings.state_db)  # a new process would build its own instance
+    saved = fresh.get_job(job["id"])
+    assert saved["status"] == "done" and saved["passed"] == saved["total"] == len(saved["results"]) >= 50
+    assert done["results"][0]["id"] == saved["results"][0]["id"]
+    # what the store holds is what the API serves
+    assert client.get(f"/api/evals/{job['id']}").json()["passed"] == saved["total"]
+
+
+def test_eval_stale_running_job_is_failed(api_app):
+    from api.state import StateStore
+    store = StateStore(api_app.settings.state_db)
+    store.save_job({"id": "stale00001", "status": "running", "mode": "self-test", "golden": "golden_set.yaml",
+                    "provider": None, "model": None, "total": 50, "completed": 3, "passed": 3,
+                    "execution_accuracy": None, "error": None, "started_at": "2020-01-01T00:00:00+00:00",
+                    "finished_at": None, "results": []})
+    assert store.running_count("2026-01-01T00:00:00+00:00") == 0
+    assert store.get_job("stale00001")["status"] == "failed"
+    assert "abandoned" in store.get_job("stale00001")["error"]
+
+
+def test_ask_history_reaches_the_model(client, api_app, fake_model):
+    if not api_app.ASK_TAKES_HISTORY:
+        pytest.skip("nl2sql.ask has no history parameter yet")
+    replies, calls = fake_model
+    replies += ["```sql" + chr(10) + "SELECT priority, COUNT(*) AS n FROM incidents GROUP BY priority" + chr(10) + "```", "By priority."]
+    body = client.post("/api/ask", json={
+        "question": "And by priority?",
+        "history": [{"question": "How many incidents are there?", "sql": "SELECT COUNT(*) AS n FROM incidents"}]}).json()
+    assert body["rows"], body
+    prompt = calls[0]["user"]  # history is rendered into the user message, not the catalog prompt
+    assert "How many incidents are there?" in prompt and "SELECT COUNT(*) AS n FROM incidents" in prompt
+
+
+def test_ask_history_is_bounded(client):
+    turns = [{"question": f"q{i}", "sql": None} for i in range(6)]
+    assert client.post("/api/ask", json={"question": "And by priority?", "history": turns}).status_code == 422

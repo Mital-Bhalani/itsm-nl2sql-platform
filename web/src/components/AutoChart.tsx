@@ -1,5 +1,6 @@
 import { Bar, BarChart, CartesianGrid, Line, LineChart, ResponsiveContainer, Tooltip, XAxis, YAxis } from 'recharts'
 import type { Cell } from '@/lib/api'
+import { TOOLTIP } from '@/components/ui'
 
 /** Pick a chart for a query result: one label column plus a number. Returns null when unsuitable. */
 export function chartSpec(columns: string[], rows: Cell[][]) {
@@ -27,10 +28,10 @@ export default function AutoChart({ spec }: { spec: NonNullable<ReturnType<typeo
     return (
       <ResponsiveContainer width="100%" height={280}>
         <LineChart data={data} margin={{ top: 10, right: 20, left: 0, bottom: 0 }}>
-          <CartesianGrid strokeDasharray="3 3" stroke="#e2e8f0" />
+          <CartesianGrid strokeDasharray="3 3" stroke="var(--chart-grid)" />
           <XAxis dataKey={label} />
           <YAxis />
-          <Tooltip />
+          <Tooltip {...TOOLTIP} />
           <Line isAnimationActive={false} type="monotone" dataKey={measure} stroke="#4F46E5" strokeWidth={2.5} dot={{ r: 4 }} />
         </LineChart>
       </ResponsiveContainer>
@@ -40,10 +41,10 @@ export default function AutoChart({ spec }: { spec: NonNullable<ReturnType<typeo
   return (
     <ResponsiveContainer width="100%" height={Math.max(180, sorted.length * 34)}>
       <BarChart data={sorted} layout="vertical" margin={{ top: 5, right: 20, left: 10, bottom: 5 }}>
-        <CartesianGrid strokeDasharray="3 3" stroke="#e2e8f0" horizontal={false} />
+        <CartesianGrid strokeDasharray="3 3" stroke="var(--chart-grid)" horizontal={false} />
         <XAxis type="number" />
         <YAxis type="category" dataKey={label} width={150} />
-        <Tooltip />
+        <Tooltip {...TOOLTIP} />
         <Bar isAnimationActive={false} dataKey={measure} fill="#4F46E5" radius={[0, 6, 6, 0]} />
       </BarChart>
     </ResponsiveContainer>

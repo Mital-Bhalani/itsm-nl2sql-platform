@@ -76,7 +76,7 @@ export default function ExplorerPage() {
               onClick={() => setParams({ table: n })}
               className={cn(
                 'rounded-full border px-4 py-1.5 text-sm font-medium',
-                n === table ? 'border-brand-600 bg-brand-600 text-white' : 'border-slate-200 bg-white text-slate-600 hover:bg-slate-50',
+                n === table ? 'border-brand-600 bg-brand-600 text-white' : 'border-line bg-surface text-ink-2 hover:bg-surface-2',
               )}
             >
               {n.replaceAll('_', ' ')} <span className="opacity-70">({t.rows.toLocaleString()})</span>
@@ -84,7 +84,7 @@ export default function ExplorerPage() {
           )
         })}
       </div>
-      {spec && <p className="mb-4 text-sm text-slate-500">{spec.description} Grain: {spec.grain}</p>}
+      {spec && <p className="mb-4 text-sm text-muted">{spec.description} Grain: {spec.grain}</p>}
 
       <Card className="mb-4 flex flex-wrap items-end gap-3">
         {filterable.map((c) => (
@@ -125,7 +125,7 @@ export default function ExplorerPage() {
               </option>
             ))}
         </Select>
-        <label className="flex items-center gap-2 pb-2 text-sm text-slate-700">
+        <label className="flex items-center gap-2 pb-2 text-sm text-ink-2">
           <input type="checkbox" checked={desc} onChange={(e) => setDesc(e.target.checked)} className="size-4 accent-brand-600" /> Descending
         </label>
         <Select label="Rows" value={size} onChange={(e) => (setSize(Number(e.target.value)), setPage(1))}>
@@ -144,7 +144,7 @@ export default function ExplorerPage() {
             onRowClick={table === 'incidents' ? (row) => navigate(`/incident?id=${row.id}`) : undefined}
             maxHeight={560}
           />
-          <div className="mt-3 flex flex-wrap items-center justify-between gap-3 text-sm text-slate-600">
+          <div className="mt-3 flex flex-wrap items-center justify-between gap-3 text-sm text-ink-2">
             <Button onClick={() => setPage((p) => p - 1)} disabled={page <= 1}>
               <ChevronLeft className="size-4" /> Previous
             </Button>

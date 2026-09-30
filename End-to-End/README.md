@@ -14,12 +14,11 @@ the first time; afterwards use it as a lookup.
 | 4 | [Semantic layer (`semantics/`)](04-Semantic-Layer.md) | The `meta_*` dictionary that tells the AI what the data means |
 | 5 | [Agent (`agent/`)](05-Agent.md) | How a question becomes safe SQL and a plain-English answer |
 | 6 | [Backend API (`api/`)](06-Backend-API.md) | Every endpoint, the services behind them, settings and security |
-| 7 | [Streamlit front end (`ui/`)](07-Frontend-Streamlit.md) | The Python UI: each page and the shared client |
-| 8 | [React front end (`web/`)](08-Frontend-React.md) | The TypeScript UI: each page, component and library file |
-| 9 | [Evals and tests (`evals/`, `tests/`)](09-Evals-and-Tests.md) | How accuracy is measured and how the code is tested |
-| 10 | [Security](10-Security.md) | Every protection, the attack it stops, and where it lives |
-| 11 | [Request lifecycle](11-Request-Lifecycle.md) | One question traced through every layer, step by step |
-| 12 | [Operations](12-Operations.md) | Setup, running, configuration, Claude Code commands, troubleshooting |
+| 7 | [React front end (`web/`)](07-Frontend-React.md) | The TypeScript UI: each page, component and library file |
+| 8 | [Evals and tests (`evals/`, `tests/`)](08-Evals-and-Tests.md) | How accuracy is measured and how the code is tested |
+| 9 | [Security](09-Security.md) | Every protection, the attack it stops, and where it lives |
+| 10 | [Request lifecycle](10-Request-Lifecycle.md) | One question traced through every layer, step by step |
+| 11 | [Operations](11-Operations.md) | Setup, running, configuration, Claude Code commands, troubleshooting |
 
 ## The whole system in one picture
 
@@ -28,9 +27,8 @@ flowchart TB
     subgraph People
         U["Service manager<br/>(web browser)"]
     end
-    subgraph Frontends["Front ends (no direct database access)"]
+    subgraph Frontend["Front end (no direct database access)"]
         R["React UI<br/>web/ (served at /web/)"]
-        S["Streamlit UI<br/>ui/ (port 8501)"]
     end
     subgraph Backend["Backend: api/ (FastAPI, port 8000)"]
         M["main.py<br/>endpoints, auth, rate limits, audit"]
@@ -45,8 +43,8 @@ flowchart TB
     end
     AI["AI provider<br/>OpenAI or Anthropic"]
 
-    U --> R & S
-    R & S -->|HTTP JSON| M
+    U --> R
+    R -->|HTTP JSON| M
     M --> SV --> DB
     M --> N --> DB
     N --> L --> AI
@@ -54,7 +52,7 @@ flowchart TB
 
 ## Four facts to remember
 
-1. **The front ends only talk to the API.** Neither UI opens the database or calls an AI model.
+1. **The front end only talks to the API.** The UI never opens the database or calls an AI model.
 2. **The database is always opened read-only.** Nothing in the running app can change data.
 3. **Meaning lives in the catalog, not in code.** Formulas and business terms are stored in the
    `meta_*` tables and read at runtime.

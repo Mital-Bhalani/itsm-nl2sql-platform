@@ -1,5 +1,88 @@
 @import "tailwindcss";
 
+/* Dark mode is a class on <html> (set by lib/settings.tsx), not the OS preference alone. */
+@custom-variant dark (&:where(.dark, .dark *));
+
+/* Semantic colour tokens. Components use these names (bg-surface, text-ink, border-line …)
+   instead of raw palette shades, so one variable swap restyles every page for dark mode. */
+:root {
+  color-scheme: light;
+  --surface: #ffffff;
+  --surface-2: #f8fafc;
+  --surface-3: #f1f5f9;
+  --page: #f5f7fb;
+  --line: #e2e8f0;
+  --line-soft: #f1f5f9;
+  --ink: #0f172a;
+  --ink-2: #334155;
+  --muted: #64748b;
+  --faint: #94a3b8;
+  --code: #0f172a;
+  --code-ink: #f1f5f9;
+  --brand-soft: #eef2ff;
+  --brand-soft-2: #e0e7ff;
+  --brand-edge: #c7d2fe;
+  --brand-text: #4338ca;
+  --brand-ring: #e0e7ff;
+  --tone-warn: #fffbeb;
+  --tone-warn-edge: #fde68a;
+  --tone-warn-ink: #92400e;
+  --tone-warn-strong: #fef3c7;
+  --tone-info: #f0f9ff;
+  --tone-info-edge: #bae6fd;
+  --tone-info-ink: #075985;
+  --tone-ok: #ecfdf5;
+  --tone-ok-edge: #a7f3d0;
+  --tone-ok-ink: #065f46;
+  --tone-ok-strong: #d1fae5;
+  --tone-bad: #fef2f2;
+  --tone-bad-edge: #fecaca;
+  --tone-bad-ink: #b91c1c;
+  --tone-bad-strong: #fee2e2;
+  --chart-grid: #e2e8f0;
+  --chart-tick: #64748b;
+  --spark-fill: #e0e7ff;
+}
+
+.dark {
+  color-scheme: dark;
+  --surface: #151b2b;
+  --surface-2: #1b2234;
+  --surface-3: #232c40;
+  --page: #0d1220;
+  --line: #2a3448;
+  --line-soft: #1f283a;
+  --ink: #e6eaf2;
+  --ink-2: #c3cad8;
+  --muted: #8b95a8;
+  --faint: #5f6a80;
+  --code: #0a0f1a;
+  --code-ink: #dfe5f0;
+  --brand-soft: rgba(99, 102, 241, 0.16);
+  --brand-soft-2: rgba(99, 102, 241, 0.28);
+  --brand-edge: rgba(129, 140, 248, 0.45);
+  --brand-text: #a5b4fc;
+  --brand-ring: rgba(99, 102, 241, 0.35);
+  --tone-warn: rgba(245, 158, 11, 0.12);
+  --tone-warn-edge: rgba(245, 158, 11, 0.4);
+  --tone-warn-ink: #fcd34d;
+  --tone-warn-strong: rgba(245, 158, 11, 0.32);
+  --tone-info: rgba(14, 165, 233, 0.12);
+  --tone-info-edge: rgba(14, 165, 233, 0.4);
+  --tone-info-ink: #7dd3fc;
+  --tone-ok: rgba(16, 185, 129, 0.12);
+  --tone-ok-edge: rgba(16, 185, 129, 0.4);
+  --tone-ok-ink: #6ee7b7;
+  --tone-ok-strong: rgba(16, 185, 129, 0.32);
+  --tone-bad: rgba(239, 68, 68, 0.12);
+  --tone-bad-edge: rgba(239, 68, 68, 0.4);
+  --tone-bad-ink: #fca5a5;
+  --tone-bad-strong: rgba(239, 68, 68, 0.32);
+  --chart-grid: #2a3448;
+  --chart-tick: #8b95a8;
+  --spark-fill: rgba(99, 102, 241, 0.25);
+}
+
 @theme {
   --font-sans: "Inter", "Segoe UI", system-ui, sans-serif;
   --font-mono: "JetBrains Mono", "Cascadia Code", Consolas, monospace;
@@ -11,15 +94,75 @@
   --color-brand-700: #4338ca;
 }
 
+@theme inline {
+  --color-surface: var(--surface);
+  --color-surface-2: var(--surface-2);
+  --color-surface-3: var(--surface-3);
+  --color-page: var(--page);
+  --color-line: var(--line);
+  --color-line-soft: var(--line-soft);
+  --color-ink: var(--ink);
+  --color-ink-2: var(--ink-2);
+  --color-muted: var(--muted);
+  --color-faint: var(--faint);
+  --color-code: var(--code);
+  --color-code-ink: var(--code-ink);
+  --color-brand-soft: var(--brand-soft);
+  --color-brand-soft-2: var(--brand-soft-2);
+  --color-brand-edge: var(--brand-edge);
+  --color-brand-text: var(--brand-text);
+  --color-brand-ring: var(--brand-ring);
+}
+
+/* Tones (warn / info / ok / bad) are explicit utilities, not theme colours: the same short name
+   maps to a tint for backgrounds, an edge shade for borders and a readable ink for text. */
+@utility bg-tone-warn { background-color: var(--tone-warn); }
+@utility bg-tone-info { background-color: var(--tone-info); }
+@utility bg-tone-ok { background-color: var(--tone-ok); }
+@utility bg-tone-bad { background-color: var(--tone-bad); }
+@utility bg-tone-warn-strong { background-color: var(--tone-warn-strong); }
+@utility bg-tone-ok-strong { background-color: var(--tone-ok-strong); }
+@utility bg-tone-bad-strong { background-color: var(--tone-bad-strong); }
+@utility border-tone-warn { border-color: var(--tone-warn-edge); }
+@utility border-tone-info { border-color: var(--tone-info-edge); }
+@utility border-tone-ok { border-color: var(--tone-ok-edge); }
+@utility border-tone-bad { border-color: var(--tone-bad-edge); }
+@utility text-tone-warn { color: var(--tone-warn-ink); }
+@utility text-tone-info { color: var(--tone-info-ink); }
+@utility text-tone-ok { color: var(--tone-ok-ink); }
+@utility text-tone-bad { color: var(--tone-bad-ink); }
+
 html, body, #root {
   height: 100%;
 }
 
 body {
-  @apply bg-slate-50 text-slate-800 antialiased;
+  @apply bg-page text-ink antialiased;
+  transition: background-color 200ms ease, color 200ms ease;
 }
 
-.recharts-cartesian-axis-tick-value {
+/* Page enter: a short fade and lift so switching routes feels immediate but not abrupt. */
+@keyframes page-in {
+  from { opacity: 0; transform: translateY(6px); }
+  to { opacity: 1; transform: none; }
+}
+.animate-page {
+  animation: page-in 180ms ease-out both;
+}
+@media (prefers-reduced-motion: reduce) {
+  .animate-page { animation: none; }
+  body { transition: none; }
+}
+
+.recharts-cartesian-axis-tick-value,
+.recharts-polar-angle-axis-tick-value,
+.recharts-legend-item-text {
   font-size: 12px;
-  fill: #64748b;
+  fill: var(--chart-tick);
+}
+.recharts-legend-item-text {
+  color: var(--ink-2) !important;
+}
+.recharts-default-tooltip {
+  color: var(--ink);
 }

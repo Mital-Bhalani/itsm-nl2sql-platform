@@ -62,9 +62,9 @@ export default function DataCheckPage() {
                 </Notice>
               )}
             </div>
-            <div className="max-h-96 overflow-auto rounded-xl border border-slate-200">
+            <div className="max-h-96 overflow-auto rounded-xl border border-line">
               <table className="min-w-full text-sm">
-                <thead className="sticky top-0 bg-slate-50 text-left text-xs uppercase tracking-wide text-slate-500">
+                <thead className="sticky top-0 bg-surface-2 text-left text-xs uppercase tracking-wide text-muted">
                   <tr>
                     <th className="px-3 py-2">Check</th>
                     <th className="px-3 py-2">Where shown</th>
@@ -73,20 +73,20 @@ export default function DataCheckPage() {
                     <th className="px-3 py-2">Result</th>
                   </tr>
                 </thead>
-                <tbody className="divide-y divide-slate-100">
+                <tbody className="divide-y divide-line-soft">
                   {reconcile.data.checks.map((c) => (
                     <tr key={c.check} title={c.sql}>
-                      <td className="px-3 py-2 text-slate-800">{c.check}</td>
-                      <td className="px-3 py-2 text-slate-500">{c.where_shown}</td>
+                      <td className="px-3 py-2 text-ink">{c.check}</td>
+                      <td className="px-3 py-2 text-muted">{c.where_shown}</td>
                       <td className="px-3 py-2 font-mono">{String(c.shown_in_ui)}</td>
                       <td className="px-3 py-2 font-mono">{String(c.in_database)}</td>
                       <td className="px-3 py-2">
                         {c.match ? (
-                          <span className="flex items-center gap-1 text-emerald-600">
+                          <span className="flex items-center gap-1 text-tone-ok">
                             <CheckCircle2 className="size-4" /> match
                           </span>
                         ) : (
-                          <span className="flex items-center gap-1 text-red-600">
+                          <span className="flex items-center gap-1 text-tone-bad">
                             <XCircle className="size-4" /> differs
                           </span>
                         )}
@@ -96,7 +96,7 @@ export default function DataCheckPage() {
                 </tbody>
               </table>
             </div>
-            <p className="mt-2 text-xs text-slate-500">Hover a row to see the SQL used for the database value.</p>
+            <p className="mt-2 text-xs text-muted">Hover a row to see the SQL used for the database value.</p>
           </>
         )}
       </Card>
@@ -113,7 +113,7 @@ export default function DataCheckPage() {
           onChange={(e) => setSql(e.target.value)}
           rows={6}
           spellCheck={false}
-          className="w-full rounded-xl border border-slate-200 bg-slate-900 p-3 font-mono text-sm text-slate-100 outline-none focus:ring-2 focus:ring-brand-200"
+          className="w-full rounded-xl border border-line bg-code p-3 font-mono text-sm text-code-ink outline-none focus:ring-2 focus:ring-brand-ring"
         />
         <div className="mt-3 flex items-center gap-3">
           <Button variant="primary" onClick={run} disabled={busy || !sql.trim()}>
@@ -121,7 +121,7 @@ export default function DataCheckPage() {
           </Button>
           {result && (
             <>
-              <span className="text-sm text-slate-500">
+              <span className="text-sm text-muted">
                 {result.row_count} rows{result.truncated ? ' (capped at 1,000)' : ''}
               </span>
               <Button variant="ghost" onClick={() => downloadCsv('query.csv', result.columns, result.rows)}>

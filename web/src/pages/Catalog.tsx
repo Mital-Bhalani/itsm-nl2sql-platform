@@ -43,12 +43,12 @@ export default function CatalogPage() {
         title="Semantic catalog"
         subtitle="The business meaning the model is given: glossary, metrics, columns and joins. Ambiguous and not-answerable items are flagged."
       />
-      <div className="mb-4 flex gap-1 border-b border-slate-200">
+      <div className="mb-4 flex gap-1 border-b border-line">
         {TABS.map((t) => (
           <button
             key={t}
             onClick={() => setTab(t)}
-            className={cn('-mb-px border-b-2 px-4 py-2 text-sm font-medium capitalize', tab === t ? 'border-brand-600 text-brand-700' : 'border-transparent text-slate-500')}
+            className={cn('-mb-px border-b-2 px-4 py-2 text-sm font-medium capitalize', tab === t ? 'border-brand-600 text-brand-text' : 'border-transparent text-muted')}
           >
             {t}
           </button>
@@ -73,7 +73,7 @@ export default function CatalogPage() {
                 <option value="ambiguous">Ambiguous</option>
                 <option value="unanswerable">Not answerable</option>
               </Select>
-              <span className="pb-2 text-sm text-slate-500">
+              <span className="pb-2 text-sm text-muted">
                 {rows.length} of {section.data.length} terms
               </span>
             </div>
@@ -81,15 +81,15 @@ export default function CatalogPage() {
               {rows.map((g) => (
                 <Card key={g.term} className="p-4">
                   <div className="mb-1 flex flex-wrap items-center gap-2">
-                    <span className="font-semibold text-slate-900">{g.term}</span>
+                    <span className="font-semibold text-ink">{g.term}</span>
                     <Badge color="#64748B">{g.kind}</Badge>
                     {!g.is_answerable && <Badge color="#DC2626">not answerable</Badge>}
                     {!!g.is_ambiguous && <Badge color="#CA8A04">ambiguous</Badge>}
                   </div>
-                  {g.synonyms && <p className="text-xs text-slate-500">Also: {g.synonyms}</p>}
-                  <p className="mt-1 text-sm text-slate-700">{g.definition}</p>
-                  {g.sql_hint && <pre className="mt-2 overflow-auto rounded-lg bg-slate-50 p-2 font-mono text-xs text-slate-700">{g.sql_hint}</pre>}
-                  {g.ambiguity_note && <p className="mt-1 text-xs text-amber-700">{g.ambiguity_note}</p>}
+                  {g.synonyms && <p className="text-xs text-muted">Also: {g.synonyms}</p>}
+                  <p className="mt-1 text-sm text-ink-2">{g.definition}</p>
+                  {g.sql_hint && <pre className="mt-2 overflow-auto rounded-lg bg-surface-2 p-2 font-mono text-xs text-ink-2">{g.sql_hint}</pre>}
+                  {g.ambiguity_note && <p className="mt-1 text-xs text-tone-warn">{g.ambiguity_note}</p>}
                 </Card>
               ))}
             </div>
@@ -105,11 +105,11 @@ export default function CatalogPage() {
                 <span className="font-semibold">{m.metric_name}</span>
                 <Badge color="#64748B">{m.unit}</Badge>
               </div>
-              <p className="text-sm text-slate-600">{m.description}</p>
-              <pre className="mt-3 overflow-auto rounded-lg bg-slate-900 p-3 font-mono text-xs text-slate-100">
+              <p className="text-sm text-ink-2">{m.description}</p>
+              <pre className="mt-3 overflow-auto rounded-lg bg-code p-3 font-mono text-xs text-code-ink">
                 {`SELECT ${m.sql_expression}\nFROM ${m.base_table} ${m.base_alias}${m.required_joins ? `\n${m.required_joins}` : ''}${m.filters ? `\nWHERE ${m.filters}` : ''}`}
               </pre>
-              {m.notes && <p className="mt-2 text-xs text-slate-500">{m.notes}</p>}
+              {m.notes && <p className="mt-2 text-xs text-muted">{m.notes}</p>}
             </Card>
           ))}
         </div>

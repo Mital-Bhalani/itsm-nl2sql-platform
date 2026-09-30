@@ -8,7 +8,7 @@ Every tracked file in the repository, grouped by folder. Files marked *(generate
 ├── README.md                      Project front page: plain-English intro, status, quick start
 ├── CLAUDE.md                      Project memory for Claude Code: decisions, facts, history, open items
 ├── requirements.txt               Python dependencies, exact pinned versions
-├── run_app.py                     Starts the API (port 8000) and the Streamlit UI (port 8501) together
+├── run_app.py                     Starts the API (port 8000), which also serves the React UI at /web/
 ├── .env.example                   Template for .env: API keys, provider/model choice, API settings
 ├── .gitignore                     Keeps secrets, databases, logs and caches out of git
 │
@@ -21,9 +21,6 @@ Every tracked file in the repository, grouped by folder. Files marked *(generate
 │   └── skills/
 │       └── diagnose-eval-failure/
 │           └── SKILL.md           Maps a failed eval to the catalog entry that needs fixing
-│
-├── .streamlit/
-│   └── config.toml                Streamlit theme (brand colours, fonts)
 │
 ├── db/                            DATA LAYER (chapter 3)
 │   ├── schema.sql                 The 5 tables: columns, keys, CHECK rules, indexes
@@ -48,23 +45,7 @@ Every tracked file in the repository, grouped by folder. Files marked *(generate
 │   ├── schemas.py                 Request/response models (validation)
 │   └── config.py                  Settings from environment / .env
 │
-├── ui/                            STREAMLIT FRONT END (chapter 7)
-│   ├── README.md                  Pages and how to run them
-│   ├── Home.py                    Entry page: status, dataset size, page cards, safety summary
-│   ├── api_client.py              HTTP client + shared page chrome (logo, CSS, header, sidebar)
-│   ├── assets/
-│   │   ├── logo.svg               Sidebar logo
-│   │   └── icon.svg               Browser tab icon
-│   └── pages/
-│       ├── 1_Ask.py               Question → answer, chart, SQL, follow-ups, feedback, compare models
-│       ├── 2_Dashboard.py         KPI tiles with trends, breakdowns, click-a-team drill-down
-│       ├── 3_Explorer.py          Browse/filter/sort/export any table
-│       ├── 4_Catalog.py           Glossary, metrics, columns, tables, joins
-│       ├── 5_Evals.py             Run the golden set (self-test or live) and see results
-│       ├── 6_Data_Check.py        UI numbers vs database + read-only SQL console
-│       └── 7_Incident.py          One incident: SLA gauge, timeline, similar incidents
-│
-├── web/                           REACT FRONT END (chapter 8)
+├── web/                           REACT FRONT END (chapter 7)
 │   ├── README.md                  Stack, build commands, file guide
 │   ├── package.json               npm dependencies and scripts (dev, build)
 │   ├── package-lock.json          Exact dependency versions
@@ -89,14 +70,14 @@ Every tracked file in the repository, grouped by folder. Files marked *(generate
 │           ├── Home.tsx  Ask.tsx  Dashboard.tsx  Explorer.tsx
 │           └── Incident.tsx  Catalog.tsx  Evals.tsx  DataCheck.tsx
 │
-├── evals/                         ACCURACY (chapter 9)
+├── evals/                         ACCURACY (chapter 8)
 │   ├── README.md                  How scoring works
-│   ├── golden_set.yaml            15 questions with reference SQL and expected rows
+│   ├── golden_set.yaml            51 questions with reference SQL and expected rows
 │   ├── golden_set_large.yaml      The same for the 50k database
 │   ├── make_golden_set.py         Generates both golden sets from their reference SQL
 │   └── run_evals.py               Scores the agent (live or self-test), JSON report option
 │
-├── tests/                         AUTOMATED TESTS (chapter 9)
+├── tests/                         AUTOMATED TESTS (chapter 8)
 │   ├── conftest.py                Builds a temp database; fake AI model fixture
 │   ├── test_guardrails.py         SQL guard, read-only, PII block, timeout
 │   ├── test_llm.py                Provider choice, missing keys, fallback
@@ -119,8 +100,7 @@ Arrows point from the user of a module to the module it uses.
 ```mermaid
 flowchart LR
     web["web/ (React)"] -->|HTTP| api
-    ui["ui/ (Streamlit)"] -->|HTTP| api
-    run["run_app.py"] -.starts.-> api & ui
+    run["run_app.py"] -.starts.-> api
     api["api/"] --> agent["agent/"]
     api --> semantics
     api --> evals["evals/"]
@@ -129,13 +109,14 @@ flowchart LR
     agent --> dbfile[("db/tickets.sqlite")]
     semantics --> dbfile
     seed["db/seed.py + schema.sql"] -->|creates| dbfile
-    tests["tests/"] --> api & agent & ui
+    tests["tests/"] --> api & agent
 ```
 
 - `db/` and `semantics/` use only the Python standard library.
-- `agent/` depends on `semantics/` (for `find_term`, `AS_OF`) and on the AI SDKs.
+- `agent/` depends on `semantics/` (for `find_term`, `catalog_as_of`) and `db/dialect.py`, and on the AI SDKs.
+- `db/dialect.py` (standard library) is the only place SQLite-specific date expressions are written; `semantics/` and `api/` compose their SQL through it.
 - `api/` imports `agent/`, `semantics/` and `evals/` (it runs eval jobs).
-- Neither front end imports Python code from the backend; they only call HTTP endpoints.
+- The front end imports no Python code from the backend; it only calls HTTP endpoints.
 
 ## Local and generated files (not in git)
 
@@ -143,6 +124,6 @@ flowchart LR
 |---|---|---|
 | `.env` | API keys and settings | `cp .env.example .env`, then edit |
 | `db/tickets.sqlite` | Default database | `python db/seed.py && python semantics/build_catalog.py` |
-| `db/tickets_large.sqlite` | 50k database | `/build-large` or the commands in chapter 12 |
+| `db/tickets_large.sqlite` | 50k database | `/build-large` or the commands in chapter 11 |
 | `web/node_modules/`, `web/dist/` | npm packages and the built React site | `cd web && npm install && npm run build` |
 | `logs/audit.jsonl` | Audit trail | Created by the API on the first question |

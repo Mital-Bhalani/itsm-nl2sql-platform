@@ -1,4 +1,4 @@
-# 10. Security
+# 9. Security
 
 Security is built in layers, so that if one layer misses something the next one catches it.
 Every protection below is enforced in code, not by trusting the AI, and every known attack
@@ -36,14 +36,13 @@ flowchart TB
 | Leaking internals in errors | Unexpected errors return only a request id; details go to the server log | `main.request_context` |
 | Clickjacking, content sniffing, script injection in the browser | `X-Frame-Options: DENY`, `nosniff`, `Referrer-Policy`, strict CSP on `/web` | `main.SECURITY_HEADERS`, `WEB_CSP` |
 | Log/header injection via request id | Only short plain tokens accepted | `main.REQUEST_ID` |
-| HTML injection in Streamlit | Text from the API escaped before raw HTML | `ui/api_client.pill`, `5_Evals.py` |
 | Accidental exposure to the network | `run_app.py` refuses a non-local `--host` without `APP_API_KEY` | `run_app.py` |
 | Secrets in git | `.env`, databases and logs are gitignored; staged changes are scanned before every push | `.gitignore`, working rules |
 | Who asked what | Every question, SQL console query and rating recorded | `logs/audit.jsonl` |
 
 ## Known limits (accepted)
 
-- The Streamlit UI has **no login**; keep it on `127.0.0.1` or put it behind a login proxy.
+- The React UI has **no login** of its own; keep it on `127.0.0.1` or put it behind a login proxy.
 - `/docs` and `/health` are public (they show the API's shape and which providers are
   configured, no ticket data).
 - Rate limits and eval jobs are kept in memory, so they reset on restart and do not work
@@ -55,7 +54,7 @@ flowchart TB
 
 1. Set a long random `APP_API_KEY` in `.env`.
 2. Run behind HTTPS (a reverse proxy such as nginx or a cloud load balancer).
-3. Put the Streamlit UI behind a login, or do not expose it.
+3. Put the UI behind a login, or do not expose it.
 4. Keep `RATE_LIMIT_PER_MIN` low and `LLM_ALLOWED_MODELS` to the models you pay for.
 5. Rotate AI provider keys that have ever been pasted anywhere.
 6. Watch `logs/audit.jsonl`.

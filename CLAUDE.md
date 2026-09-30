@@ -12,12 +12,13 @@ writes SQL, runs it **read-only**, and answers in plain English — **with the S
 **Stack:** Python 3.11+ · SQLite 3.37+ (STRICT tables; swappable to Postgres/Snowflake later) ·
 stdlib where possible. `db/` and `semantics/` are stdlib only. `requirements.txt` pins
 `openai==1.51.2`, `anthropic==1.9.0`, `python-dotenv==1.0.1`, `pyyaml`, `httpx==0.27.2`,
-`fastapi`, `uvicorn`, `streamlit` and `pytest` (all exact pins; `pip check` clean). **Keep the httpx pin** while openai is 1.51.2: httpx 0.28+
+`fastapi`, `uvicorn` and `pytest` (all exact pins; `pip check` clean). **Keep the httpx pin** while openai is 1.51.2: httpx 0.28+
 makes `OpenAI()` crash with `unexpected keyword argument 'proxies'`. Drop the pin only if openai
 is upgraded (to 1.55.3 or later).
 
-**Current objective (2026-09-29):** end-product build done — multi-model agent, FastAPI
-backend, Streamlit UI with a UI-vs-database check, pytest suite. Next: the open items below.
+**Current objective (2026-09-30):** end-product build done — multi-model agent, FastAPI
+backend, React UI with a UI-vs-database check, pytest suite. The Streamlit UI was removed on
+2026-09-30 (React is the only front end). Next: the open items below.
 
 ## Build and run (in this order)
 
@@ -27,9 +28,10 @@ python semantics/build_catalog.py   # adds the meta_* semantic catalog to db/tic
 python agent/nl2sql.py "question"   # NL2SQL agent: catalog context -> OpenAI -> guarded SQL -> rows
 python evals/run_evals.py           # score the agent on evals/golden_set.yaml (--json, --self-test, --golden)
 python agent/naive_spike.py         # Day 1 naive spike (no context; shows why the agent is needed)
-python run_app.py                   # API :8000 (/docs) + Streamlit UI :8501, Ctrl+C stops both
+python run_app.py                   # API :8000 (/docs), React UI at :8000/web/, Ctrl+C stops it
 cd web && npm run build            # React UI -> web/dist, served by the API at /web/ (npm run dev: :5173)
-python -B -m pytest tests -p no:cacheprovider   # 69 tests, no API key, temp DB outside repo
+python -B -m pytest tests -p no:cacheprovider   # 83 tests, no API key, temp DB outside repo
+cd web && npm run e2e              # 22 Playwright checks in Edge; starts its own API on :8010 (E2E_PORT=8000 reuses a running one)
 ```
 
 Slash commands: `/smoke` (rebuild + checks), `/build-catalog` (rebuild catalog, report
@@ -45,10 +47,13 @@ database, prints row counts and reports pass/fail.
 **Runnable status (2026-09-29):** everything runs end to end. Dependencies installed
 (`pip install -r requirements.txt`, `pip check` clean, Python 3.12 user site). `.env` holds
 `OPENAI_API_KEY` (gitignored; never print or commit it) and the OpenAI account has credits.
-- `run_evals.py --self-test` (no API): **15/15**. Fed deliberately wrong SQL, scoring caught 12
-  of 14 traps; the 2 misses are golden-set limits (see Evals below), not scoring bugs.
-- **Live eval (gpt-4o-mini, temperature 0): 15/15 on three consecutive runs** (was 13/15
-  before the catalog fixes listed under Evals).
+- `run_evals.py --self-test` (no API): **50/50** on both golden sets (2026-09-30, after the set
+  grew from 15 to 50). Earlier trap check: fed deliberately wrong SQL, scoring caught 12 of 14
+  traps; the 2 misses are golden-set limits (see Evals below), not scoring bugs.
+- **Live eval (gpt-4o-mini, temperature 0), 50 questions: 50/50 on both sets on the third run
+  (2026-09-30)**; the first two runs were 47–48/50, see the Evals section for what each miss was.
+  On the original 15 questions: 15/15 on three consecutive runs (was 13/15 before the catalog
+  fixes listed under Evals).
 - Naive spike first real output confirms the Day 1 failure modes: invented table
   `sla_breaches`, Postgres `DATE_TRUNC`/`INTERVAL`, real clock `CURRENT_DATE`, breach assumed
   to be stored.
@@ -79,15 +84,14 @@ read-only · **SELECT-only** · auto-LIMIT · **no raw PII in output** (`users.n
 
 | folder | day | status |
 |---|---|---|
-| `db/` | 1 | **done**: `schema.sql`, `seed.py`, generated `tickets.sqlite` (gitignored `*.sqlite`) |
+| `db/` | 1 | **done**: `schema.sql`, `seed.py`, generated `tickets.sqlite` (gitignored `*.sqlite`); `dialect.py` (SQLite/PostgreSQL date expressions), `schema.postgres.sql` (untested) |
 | `agent/` | 1 → 2–3 | `naive_spike.py`, **`nl2sql.py`** (agent: `translate`, `ask`), **`llm.py`** (providers) |
 | `semantics/` | 2 | **done**: `build_catalog.py` fills all five meta_* tables |
-| `evals/` | 2 | **working**: `golden_set.yaml` (15 questions) + `run_evals.py` |
-| `api/` | 3 | **done**: FastAPI (`main.py`, `services.py`, `schemas.py`, `config.py`) |
-| `ui/` | 4 | **done**: Streamlit `Home.py` + `pages/1_Ask … 7_Incident`, `api_client.py`, `assets/` |
-| `web/` | 4+ | **done**: React 19 + TS + Tailwind 4 + TanStack Query + Recharts; built to `web/dist`, served at `/web/` |
-| `End-to-End/` | — | **done**: 13-chapter project guide (hierarchy, every script/component, request lifecycle, security, operations); update it when code changes |
-| `tests/` | — | **done**: pytest, 69 tests (guardrails, providers, API with a fake model, security attacks) |
+| `evals/` | 2 | **done**: `golden_set.yaml` (51 questions) + `run_evals.py` + `make_golden_set.py` |
+| `api/` | 3 | **done**: FastAPI (`main.py`, `services.py`, `schemas.py`, `config.py`, `state.py` = SQLite store for rate limits and eval jobs) |
+| `web/` | 4 | **done**: React 19 + TS + Tailwind 4 + TanStack Query + Recharts; built to `web/dist`, served at `/web/` |
+| `End-to-End/` | — | **done**: 11-chapter project guide (hierarchy, every script/component, request lifecycle, security, operations); update it when code changes |
+| `tests/` | — | **done**: pytest, 83 tests (guardrails, providers, dialect, API with a fake model, state store, security attacks) + `web/e2e` Playwright (22) |
 
 `scripts/`, `docs/` and `spike/` from the original plan were not created: the data generator
 lives in `db/seed.py` and the spike in `agent/naive_spike.py`. There is no `db/build_db.py`.
@@ -165,7 +169,7 @@ python evals/run_evals.py --golden evals/golden_set_large.yaml   # DB read from 
 python agent/nl2sql.py --db db/tickets_large.sqlite "question"
 ```
 Verified: 50,000 incidents / 10,000 changes, breach 6,600/44,000 = 15.0%, open 5,000 (10%),
-deterministic, FK/integrity clean; self-test 15/15; **live 15/15**; slowest reference query
+deterministic, FK/integrity clean; self-test 50/50; **live 50/50** (2026-09-30); slowest reference query
 257 ms (J03); `LIMIT 1000` capped a 42,364-row query. At this scale K01 (teams with zero
 breaches → no rows) and K02 (Network cancelled → 173) lose their "zero" edge; they are still
 valid tests. `db/tickets_large.sqlite` is gitignored; `golden_set_large.yaml` is committed.
@@ -178,7 +182,7 @@ byte-identically).
 |---|---|---|
 | `meta_columns` | 23 | type, nullability, keys, FK, allowed values (read from schema.sql) + drafted description, example, `is_pii`, `is_ambiguous`/note, `synonyms` |
 | `meta_metrics` | 3 | `mttr` (minutes), `sla_breach_rate`, `reopen_rate` (ratio 0–1) as reusable SQL fragments |
-| `meta_glossary` | 42 | business terms → entity / value / metric / time / concept, with `sql_hint` |
+| `meta_glossary` | 43 | business terms → entity / value / metric / time / concept, with `sql_hint` |
 | `meta_tables` | 5 | description and grain per data table (`TABLE_DRAFTS`) |
 | `meta_joins` | 4 | one row per schema foreign key, with cardinality and pitfalls (`JOINS`); build fails if they drift |
 
@@ -234,7 +238,7 @@ when no provider was requested explicitly. All failures raise `AgentAPIError` (r
 **Anthropic has not been run live yet** (no `ANTHROPIC_API_KEY` as of 2026-09-29); it is
 covered only by mocked tests.
 
-## API and UI (`api/`, `ui/`, `run_app.py`)
+## API and UI (`api/`, `web/`, `run_app.py`)
 
 - API endpoints: `/health`, `/api/models`, `/api/overview`, `POST /api/ask`, `/api/kpis`,
   `/api/groups`, `/api/tables[/{name}]` (filters `f_<col>`), `/api/incidents/{id}`,
@@ -257,21 +261,31 @@ covered only by mocked tests.
   bucket (ask, sql, evals, feedback); (5) any `model` string accepted (cost abuse) - allow-list
   `llm.allowed_models()` + `LLM_ALLOWED_MODELS`; (6) OpenAI auth errors echo part of the key -
   `llm.redact()`; (7) eval runs unlimited - rate limit + `MAX_RUNNING_JOBS = 2`; plus security
-  headers and a CSP on `/web`, sanitised `X-Request-ID`, bytes-safe key compare, HTML-escaped
-  Streamlit pills, and `run_app.py` refuses a non-local `--host` without `APP_API_KEY`.
-  Still open: the Streamlit UI has no login (keep it local); `/docs` and `/health` are public.
+  headers and a CSP on `/web`, sanitised `X-Request-ID`, bytes-safe key compare, and `run_app.py` refuses a non-local `--host` without `APP_API_KEY`.
+  Still open: the React UI has no login (keep it local); `/docs` and `/health` are public.
 - UI talks only to the API. Sidebar: dataset, provider, model (kept across pages), connected
   DB file + last-changed time, **Refresh from database** (UI caches API answers 10 s).
   Ask page can **compare two models** side by side, draws a chart automatically, offers three
   follow-up questions (the answer call returns JSON `{answer, followups}`; `parse_answer`
   falls back to plain text) and records thumbs up/down via `POST /api/feedback`.
-- UI polish (2026-09-29): theme in `.streamlit/config.toml` (root), logo in `ui/assets/`,
-  `hero()` header band; dashboard sparklines + period deltas (`delta_color="inverse"` for
-  breaches/MTTR/reopen) and click-a-team drill-down to the explorer (`st.switch_page`, preset
-  via session_state keys `explorer_table` / `incidents_assignment_group_id`); incident page
-  `7_Incident.py` (gauge, timeline, `/api/incidents/{id}/similar`). `st.switch_page` cannot run
-  in Streamlit's AppTest (single page); verify page jumps in the real app.
-- **React UI (`web/`, 2026-09-29):** same pages as Streamlit, hash routes, same-origin API calls
+- Pages: Home, Ask, Dashboard (sparklines, period deltas, click-a-team drill-down to the
+  explorer), Explorer, Incident (gauge, timeline, `/api/incidents/{id}/similar`), Catalog,
+  Evals, Data check.
+- **Streamlit UI removed (2026-09-30):** `ui/`, `.streamlit/` and the `streamlit` pin are gone;
+  `run_app.py` starts only uvicorn; `CORS_ORIGINS` defaults to the Vite dev server (5173). The
+  Streamlit code is still in git history before that date if ever needed.
+- **UI polish (2026-09-30):** light/dark theme with a toggle in the top bar (top right on every
+  page; stored in `localStorage`, OS preference on first visit, `?theme=dark|light` override);
+  all colours go through semantic tokens in `web/src/index.css` (`bg-surface`, `text-ink`,
+  `border-line`, `bg-tone-*` …; `@custom-variant dark` on the `dark` class of `<html>`, set in
+  `main.tsx` before first paint); responsive shell (sidebar becomes a drawer below `lg`, top bar
+  with menu button); fast page switches (`web/src/routes.ts` prefetches every page chunk in idle
+  time and on link hover, `gcTime` 10 min, 180 ms fade-in). Checked with headless Edge shots in
+  both themes; note Chromium's headless window cannot go below ~500 px wide, so phone widths
+  were checked at 500 px. Pitfall found: a `@utility text-tone-ok` clashed with the
+  `--color-tone-ok` theme colour (same generated class name), so tones are plain `@utility`
+  rules, not theme colours.
+- **React UI (`web/`, 2026-09-29):** hash routes, same-origin API calls
   (Vite dev proxy / FastAPI `StaticFiles` mount at `/web`, `/` redirects there). Node 24 LTS
   installed system-wide with winget (first attempt without admin used a portable copy, since
   removed). Checked with headless Edge screenshots (`msedge --headless=new --screenshot`).
@@ -281,9 +295,8 @@ covered only by mocked tests.
   `test_connection_works_across_threads`; (2) React effect returned `scrollIntoView()`'s
   Promise (newer Chromium) and crashed the page - effects use braces; (3) Recharts
   animations never finish headless - `isAnimationActive={false}`. `web/` sits in OneDrive:
-  `node_modules` syncs too (small, 67 packages). Streamlit worker threads must not touch
-  `st.session_state` (bug found and fixed in `1_Ask.py`).
-- **UI ↔ database check** (page `6_Data_Check.py`, `/api/reconcile`): 25 checks compare every
+  `node_modules` syncs too (small, 67 packages).
+- **UI ↔ database check** (Data check page, `/api/reconcile`): 25 checks compare every
   number the UI shows with SQL written separately from `meta_metrics` (`services.DIRECT_CHECKS`,
   from the schema-header definitions); 25/25 on both datasets. `/api/sql` = user SQL console
   through `guard_sql` + `run_sql`. The API opens the database per request, so changes show up
@@ -293,11 +306,23 @@ covered only by mocked tests.
 ## Evals (`evals/golden_set.yaml`, `evals/run_evals.py`)
 
 `--provider` / `--model` score another model; the JSON report records them. Live OpenAI after
-the provider refactor: **15/15** (2026-09-29).
+the provider refactor: 15/15 (2026-09-29); after growing the set to 50: **50/50 on both golden
+sets** (2026-09-30, third run). After the 2026-09-30 improvement round (51 questions, final rule wording):
+**51/51 on both golden sets, two consecutive runs each** (four runs, zero misses).
 
-15 questions (4 easy lookups, 4 date ranges, 4 multi-table joins, 3 edge cases incl. a
-refusal). Expected rows were generated by running each `reference_sql`; regenerate them if
-`seed.py` changes. Scoring: order-insensitive unless `order_matters`; numeric `tolerance`;
+**51 questions** (12 easy lookups, 13 date ranges, 14 multi-table joins, 12 edge cases incl.
+two refusals). The first 15 (E01–E04, D01–D04, J01–J04, K01–K03) date from the original build;
+**35 were added 2026-09-30** (E05–E12, D05–D13, J05–J14, K04–K11), each grounded in a seed fact
+(see the `notes` in `make_golden_set.py`): plural wording ("open tickets", "which teams"), the
+schema-header example questions (MTTR by priority, reopened more than once, high-risk changes
+next week per team, agents per group), other time columns (`planned_start`, `resolved_at`),
+"overdue" vs "breach", rate vs count rankings (J06), zero answers (cancelled P1, opened in 2025,
+opened last month and still open), a non-existent team (K05, 0 or no rows), month labels
+(D06 accepts `YYYY-MM` or `MM`), minutes-or-hours alternatives for MTTR, and a second refusal
+(response time). D11 is the "next week" case whose two readings return different rows. Both
+golden sets self-test 51/51. K12 ("incidents assigned to the Network team", 83) is the
+regression for the false refusal fixed on 2026-09-30. Expected rows come from running each `reference_sql`; regenerate
+both files with `make_golden_set.py` if `seed.py` changes. Scoring: order-insensitive unless `order_matters`; numeric `tolerance`;
 extra result columns allowed if a subset matches; `alternatives` accepted for ambiguous
 questions; refusal questions pass only on refusal. Statuses `pass|wrong_result|sql_error|
 unsafe|no_sql`; `--json` prints the object `/run-evals` reads. API failure stops the run
@@ -328,6 +353,83 @@ runs (2026-09-29)** after these catalog fixes (no agent code changed):
   on joined tables go in the LEFT JOIN's ON clause and "zero X" uses HAVING. Result: K01 5/5,
   no unneeded joins, 15/15 twice on both golden sets.
 
+**Growing the set to 50 (2026-09-30), what the three live runs showed** (agent and catalog
+unchanged; only the golden set was corrected where the reference was the problem):
+- K05 first read "How many incidents are **assigned to** the Security team?": `find_term` matched
+  "assigned to" (a synonym of the unanswerable term *assignee*) and the agent refused before any
+  model call. A real false-refusal risk for wording like "tickets assigned to Network"; reworded
+  the question ("does the Security team have") and logged it as open item 10.
+- J13 "resolve within SLA last month": the model filters `resolved_at` (the catalog's "resolved
+  <window>" rule) while the first reference used `opened_at`; made `resolved_at` the primary
+  reading and kept `opened_at` as an alternative (20 vs 19 at the default size).
+- D07 "high-risk changes planned this month": the model excludes Cancelled and stops at the
+  as-of date (glossary "this month"); the reference counted the whole calendar month with
+  cancelled included. Identical (3) on the default set, different on the large one, so the
+  large run caught it. Now three accepted readings.
+- K07 "teams with no open P1 incidents" failed once with `status IN ('New', 'In Progress')`
+  (On Hold dropped; the only open Service Desk P1 is On Hold) and passed on the other runs. A
+  genuine intermittent agent miss, kept as-is; if it recurs, strengthen the "open" definition
+  (glossary `open incident` / `meta_columns[incidents.status]`).
+- E08 "which incidents were reopened more than once" returned 1,100 ids on the large set and
+  hit `LIMIT 1000`; changed to a count so the question works at both sizes.
+
+**Improvement round (2026-09-30, after the 50-question set)**, all verified (pytest 83, e2e 22,
+self-test 51/51 both sets):
+- **False refusal fixed**: "assigned to" removed from the *assignee* synonyms (now "assigned
+  person, assigned engineer, who is working on, ..."); "incidents assigned to Network" answers 83.
+  Eval K12 guards it.
+- **"Open" = all three statuses**: after three wordings (see the rule-wording note below) the
+  fix that held is a clause on the existing hint rule in `build_context`: "do not invent
+  formulas or shorten status lists (an open incident is always i.status IN ('New', 'In
+  Progress', 'On Hold'), all three)", plus the same sentence in the glossary `open incident`
+  definition. Reopen-rate notes carry the same percentage convention as breach rate (open
+  item 1 closed).
+- **Conversation memory**: `nl2sql.ask/translate(history=[{question, sql}])`; the last 3 turns go
+  into the USER message under "CONVERSATION SO FAR" (system prompt unchanged, so the provider
+  cache still hits). API: `AskRequest.history` (max 5 turns, 422 beyond). React Ask page sends
+  the thread's last 3 SQL-producing turns; Clear resets. Verified live: "and by team?" after
+  "How many P1 incidents are currently open?" kept priority = 1 and all three open statuses.
+- **Prompt cost / latency measured**: OpenAI caches the catalog prefix automatically: 4,224 of
+  ~4,400 prompt tokens cached from the second call on (`LLMReply.tokens_cached`, also summed
+  into the ask result). Cached calls take 1.2–1.8 s. The slow first calls (20–52 s) are
+  provider-side and happen even with a cached prefix and after `llm.warm_up()`; the SDK client is
+  now built once per provider and reused (`llm._client`, `reset_clients()`), and the API warms it
+  in a thread at startup, but that removes only the local part of the delay.
+- **State store** `api/state.py` (`STATE_DB`, default `logs/state.sqlite`, WAL): rate-limit hits
+  and eval jobs, shared across processes; jobs persist across restarts; `MAX_RUNNING_JOBS`
+  counted from the store; stale running jobs (>30 min) marked failed. `GET /api/evals` lists
+  stored runs; `GET /api/evals/history?golden=&limit=&mode=` gives per-question pass rates and
+  failures. Evals page shows recent runs and flaky questions.
+- **As-of date is a build setting**: `AS_OF=YYYY-MM-DD|today python semantics/build_catalog.py`
+  writes `meta_settings(as_of, dialect, built_at)`; the agent (`catalog_as_of(conn)`) and the
+  API read it from the connected database, nothing hard-codes 2026-09-28 at runtime any more
+  (the golden sets still assume the sample date).
+- **Dialect layer** `db/dialect.py` (stdlib): `minutes_between`, `date_from`, `month` for
+  SQLite and PostgreSQL; `build_catalog.py`, `services.py` and the prompt's dialect line use
+  it. SQLite catalog text verified byte-identical before/after. `db/schema.postgres.sql` added.
+  PostgreSQL output is **not** run against a server yet; the read-only connection, authorizer
+  and limits are still SQLite-only.
+- **CI**: `.github/workflows/ci.yml`: Python job (pip check, seed + catalog for both sizes,
+  golden sets regenerate byte-identical, both self-tests, pytest) and web job (npm ci, lint,
+  build, then boots the API and checks `/web/` and `/api/reconcile`). Playwright is not in CI
+  (needs Edge/Chromium download); run `npm run e2e` locally.
+- **React UX**: drawer focus trap + Escape; saved questions (star on an answer, chips on Ask,
+  card on Home, localStorage `itsm-insights-saved`, max 20); ask bar no longer fixed at 288 px
+  on phones.
+- `streamlit` package uninstalled from the local environment (`pip check` clean).
+- **Rule wording matters (again)**, three attempts at the On Hold rule, each verified live:
+  (1) a standalone RULE "'Open' incidents are New, In Progress AND On Hold, always" made the
+  model add a status filter to "incidents **opened** per month" (D06 failed on both sets);
+  (2) rewording it to "'Open' as a STATUS ... 'Opened' is about the opened_at DATE" broke
+  D06, D13 and J01 deterministically (invented 30-day and '-2 month' windows, HAVING > 0);
+  (3) removing the standalone rule and adding one clause to the existing "use hints exactly"
+  rule passed every probe (J01, D01, D06, D13, E02, E05, J03, K07, K08 and D11 large).
+  A new standalone rule changes behaviour across the whole set; a clause on an existing rule
+  is far safer. Also: D11 on the large set once read "scheduled next week" as
+  `status IN ('Scheduled', 'Implement')`; new glossary term **`scheduled for`** (synonyms
+  scheduled in, planned for/in, booked for, due in): window on `planned_start`,
+  `status <> 'Cancelled'`, never `status = 'Scheduled'`. Glossary is now 43 terms.
+
 Lessons: the agent's prompt RULES outrank catalog notes — if a catalog fix has no effect, look
 for a conflicting rule in `build_context`. Catalog wording generalises — fix narrowly, re-run
 the **whole** set, and repeat runs
@@ -336,23 +438,29 @@ alongside these fixes is not proof of general accuracy; grow the golden set (ope
 
 ## Open items / next steps
 
-1. Apply the percentage convention to `reopen_rate` too (only `sla_breach_rate` was changed).
+1. ~~Apply the percentage convention to `reopen_rate` too.~~ Done 2026-09-30.
 2. Resolve the flagged ambiguities with the business (especially Resolved vs Closed).
-3. Add plural questions ("how many tickets…", "which teams…"), a Cancelled-P1 case for E02,
-   and different-answer readings of "next week" to the golden set.
+3. ~~Add plural questions, a Cancelled-P1 case for E02, and different-answer readings of "next
+   week" to the golden set.~~ Done 2026-09-30 (E05, K04, D11 among the 35 new questions).
 4. Add `ANTHROPIC_API_KEY` and run `python evals/run_evals.py --provider anthropic` to get a
    real Claude score (not yet measured).
 5. **Rotate the OpenAI key**: it was pasted into a chat session.
 6. Optional: priority synonyms "urgent", "highest/lowest priority", "moderate/normal priority"
    were dropped when the vocabulary was standardised; re-add to `PRIORITY_LEVELS` if wanted.
 7. Decide whether the spike should take the question as a CLI argument.
-8. Production gaps still open: no Dockerfile/CI (Docker not installed here); eval jobs and rate
-   limits are in-memory (single process); no user accounts/SSO (one shared API key); the
-   whole catalog is sent on every call (cached for Claude only); `AS_OF` is fixed for the
-   synthetic data and must become the real clock on real data.
+8. Production gaps still open: no Dockerfile (Docker not installed here); no user accounts/SSO
+   (one shared API key, deliberately deferred); PostgreSQL dialect written but never run
+   against a server (needs a connection factory, read-only role and statement_timeout in
+   place of the SQLite authorizer); Playwright e2e not in CI. Closed 2026-09-30: CI on GitHub
+   Actions, state store for rate limits and eval jobs, prompt caching measured (OpenAI caches
+   the catalog prefix automatically), `AS_OF` is a catalog build setting.
 9. 2026-09-29: CLAUDE.md was once overwritten on disk by an older version from outside the
    session (suspected OneDrive sync); restored from git. If it happens again, compare with
    `git show HEAD:CLAUDE.md` before editing.
+10. ~~False refusal on "assigned to <team>".~~ Fixed 2026-09-30 (synonym dropped, eval K12).
+11. First OpenAI call after a quiet period is sometimes 20–50 s even with a cached prefix and
+   a warm client; later calls 1–2 s. Provider-side. If it matters, add a UI notice after 10 s
+   or try a different model/region; `timings.llm_ms` in the ask result shows the split.
 
 Closed gaps (2026-09-28): no High-risk change next week → pinned changes 91/92 in `seed.py`;
 plural words missed by glossary lookup → `find_term()` / `singular()` in `build_catalog.py`.

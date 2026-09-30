@@ -1,9 +1,10 @@
 import { useQuery } from '@tanstack/react-query'
-import { BookOpen, CheckCircle2, FolderSearch, LayoutDashboard, MessageSquare, ScanSearch, Ticket } from 'lucide-react'
+import { BookOpen, CheckCircle2, FolderSearch, LayoutDashboard, MessageSquare, ScanSearch, Star, Ticket } from 'lucide-react'
 import { Link } from 'react-router-dom'
 import { useHealth } from '@/components/Layout'
 import { Card, ErrorBox, Notice, PageHeader, Spinner, Stat } from '@/components/ui'
 import { api } from '@/lib/api'
+import { useSavedQuestions } from '@/lib/saved'
 import { useSettings } from '@/lib/settings'
 
 const PAGES = [
@@ -20,6 +21,7 @@ export default function HomePage() {
   const { dataset } = useSettings()
   const health = useHealth().data!
   const overview = useQuery({ queryKey: ['overview', dataset], queryFn: () => api.overview(dataset) })
+  const { saved } = useSavedQuestions()
 
   return (
     <>
@@ -54,7 +56,7 @@ export default function HomePage() {
               <Stat key={table} label={table.replaceAll('_', ' ')} value={n.toLocaleString()} />
             ))}
           </div>
-          <p className="mt-2 text-xs text-slate-500">
+          <p className="mt-2 text-xs text-muted">
             Incidents opened {overview.data.incidents_from.slice(0, 10)} to {overview.data.incidents_to.slice(0, 10)} ·
             catalog: {overview.data.catalog_counts.glossary} glossary terms, {overview.data.catalog_counts.metrics}{' '}
             metrics, {overview.data.catalog_counts.columns} columns
@@ -62,18 +64,37 @@ export default function HomePage() {
         </>
       )}
 
+      {saved.length > 0 && (
+        <Card className="mt-8" data-testid="home-saved">
+          <h3 className="mb-2 flex items-center gap-1.5 font-semibold">
+            <Star className="size-4 fill-amber-400 text-amber-400" /> Your saved questions
+          </h3>
+          <div className="flex flex-wrap gap-2">
+            {saved.map((q) => (
+              <Link
+                key={q}
+                to={`/ask?q=${encodeURIComponent(q)}`}
+                className="rounded-full border border-brand-edge bg-brand-soft px-3 py-1.5 text-sm text-brand-text hover:bg-brand-soft-2"
+              >
+                {q}
+              </Link>
+            ))}
+          </div>
+        </Card>
+      )}
+
       <h2 className="mb-3 mt-8 text-lg font-semibold">Where to go</h2>
       <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 xl:grid-cols-4">
         {PAGES.map(({ to, label, icon: Icon, text }) => (
           <Link key={to} to={to}>
-            <Card className="h-full transition hover:-translate-y-0.5 hover:border-brand-200 hover:shadow-md">
-              <div className="mb-2 flex items-center gap-2 font-semibold text-slate-900">
-                <span className="rounded-lg bg-brand-50 p-2 text-brand-600">
+            <Card className="h-full transition hover:-translate-y-0.5 hover:border-brand-edge hover:shadow-md">
+              <div className="mb-2 flex items-center gap-2 font-semibold text-ink">
+                <span className="rounded-lg bg-brand-soft p-2 text-brand-text">
                   <Icon className="size-4" />
                 </span>
                 {label}
               </div>
-              <p className="text-sm text-slate-500">{text}</p>
+              <p className="text-sm text-muted">{text}</p>
             </Card>
           </Link>
         ))}
@@ -81,7 +102,7 @@ export default function HomePage() {
 
       <Card className="mt-8">
         <h3 className="mb-2 font-semibold">Safety and data handling</h3>
-        <ul className="list-disc space-y-1 pl-5 text-sm text-slate-600">
+        <ul className="list-disc space-y-1 pl-5 text-sm text-ink-2">
           <li>The database is opened read-only; only one SELECT can run, with a row limit and a 5-second timeout.</li>
           <li>Personal data (user names) is masked in the explorer and blocked in generated SQL.</li>
           <li>Questions about data that does not exist (assignee, caller, downtime…) are refused instead of guessed.</li>

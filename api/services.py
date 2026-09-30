@@ -12,7 +12,8 @@ import sqlite3
 from datetime import datetime, timezone
 
 import nl2sql
-from build_catalog import AS_OF
+from build_catalog import catalog_as_of
+from dialect import DIALECT
 
 DATA_TABLES = ("assignment_groups", "users", "sla_targets", "incidents", "changes")
 CATALOG_TABLES = {"tables": "meta_tables", "columns": "meta_columns", "joins": "meta_joins",
@@ -45,7 +46,7 @@ def overview(conn):
     meta = {name: conn.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]
             for name, table in CATALOG_TABLES.items()}
     span = conn.execute("SELECT MIN(opened_at), MAX(opened_at) FROM incidents").fetchone()
-    return {"as_of": AS_OF, "row_counts": counts, "catalog_counts": meta,
+    return {"as_of": catalog_as_of(conn), "row_counts": counts, "catalog_counts": meta,
             "incidents_from": span[0], "incidents_to": span[1]}
 
 
@@ -168,7 +169,8 @@ def kpis(conn, date_from=None, date_to=None, group_id=None):
         f"{'WHERE ' + ' AND '.join(where) if where else ''} GROUP BY i.status ORDER BY 2 DESC",
         params))
 
-    change_params = [AS_OF]
+    as_of = catalog_as_of(conn)
+    change_params = [as_of]
     change_where = "c.planned_start >= ?"
     if group_id is not None:
         change_where += " AND c.assignment_group_id = ?"
@@ -178,7 +180,7 @@ def kpis(conn, date_from=None, date_to=None, group_id=None):
         "AND c.status NOT IN ('Closed', 'Cancelled') GROUP BY c.risk "
         "ORDER BY CASE c.risk WHEN 'High' THEN 1 WHEN 'Moderate' THEN 2 ELSE 3 END", change_params))
 
-    return {"as_of": AS_OF, "filters": {"date_from": date_from, "date_to": date_to,
+    return {"as_of": as_of, "filters": {"date_from": date_from, "date_to": date_to,
                                         "group_id": group_id},
             "headline": headline, "by_team": sorted(by_team.values(), key=lambda e: e["team"]),
             "by_month": sorted(by_month.values(), key=lambda e: e["month"]),
@@ -263,19 +265,20 @@ def browse(conn, table, filters=None, search=None, sort=None, descending=False, 
 def incident(conn, incident_id):
     row = conn.execute(
         "SELECT i.*, g.name AS assignment_group, s.target_minutes, "
-        "(julianday(i.resolved_at) - julianday(i.opened_at)) * 1440 AS resolution_minutes, "
+        f"{DIALECT.minutes_between('i.resolved_at', 'i.opened_at')} AS resolution_minutes, "
         "datetime(i.opened_at, '+' || s.target_minutes || ' minutes') AS sla_due_at "
         "FROM incidents i JOIN assignment_groups g ON g.id = i.assignment_group_id "
         "JOIN sla_targets s ON s.priority = i.priority WHERE i.id = ?", (incident_id,)).fetchone()
     if row is None:
         return None
     out = dict(row)
+    as_of = catalog_as_of(conn)
     minutes = out["resolution_minutes"]
     out["resolution_minutes"] = _round(minutes)
     out["sla_breached"] = None if minutes is None else minutes > out["target_minutes"]
     if minutes is None and out["status"] in ("New", "In Progress", "On Hold"):
-        age = conn.execute("SELECT (julianday(?) - julianday(?)) * 1440",
-                           (f"{AS_OF} 00:00:00", out["opened_at"])).fetchone()[0]
+        age = conn.execute(f"SELECT {DIALECT.minutes_between('?', '?')}",
+                           (f"{as_of} 00:00:00", out["opened_at"])).fetchone()[0]
         out["age_minutes"] = _round(age)
         out["past_target"] = age > out["target_minutes"]
     elapsed = minutes if minutes is not None else out.get("age_minutes")
@@ -285,7 +288,7 @@ def incident(conn, incident_id):
     if out["resolved_at"]:
         events.append({"event": out["status"], "at": out["resolved_at"]})
     elif out["status"] in ("New", "In Progress", "On Hold"):
-        events.append({"event": f"Now ({out['status']})", "at": f"{AS_OF} 00:00:00"})
+        events.append({"event": f"Now ({out['status']})", "at": f"{as_of} 00:00:00"})
     out["timeline"] = sorted(events, key=lambda e: e["at"])
     return out
 
@@ -343,7 +346,7 @@ def db_info(path):
 
 # Written independently of meta_metrics on purpose, straight from the definitions in the
 # schema header, so a wrong catalog fragment or a wrong API calculation shows up as a mismatch.
-BREACH = ("(julianday(i.resolved_at) - julianday(i.opened_at)) * 1440 > s.target_minutes")
+BREACH = f"{DIALECT.minutes_between('i.resolved_at', 'i.opened_at')} > s.target_minutes"
 RESOLVED = "i.status IN ('Resolved', 'Closed')"
 OPEN = "i.status IN ('New', 'In Progress', 'On Hold')"
 DIRECT_CHECKS = [
@@ -357,7 +360,7 @@ DIRECT_CHECKS = [
      f"SELECT ROUND(100.0 * SUM({BREACH}) / COUNT(*), 1) FROM incidents i "
      f"JOIN sla_targets s ON s.priority = i.priority WHERE {RESOLVED}"),
     ("MTTR minutes", "mttr_minutes",
-     f"SELECT ROUND(AVG((julianday(i.resolved_at) - julianday(i.opened_at)) * 1440), 1) "
+     f"SELECT ROUND(AVG({DIALECT.minutes_between('i.resolved_at', 'i.opened_at')}), 1) "
      f"FROM incidents i WHERE {RESOLVED}"),
     ("Reopen rate %", "reopen_rate_pct",
      "SELECT ROUND(100.0 * SUM(i.reopened_count > 0) / COUNT(*), 1) FROM incidents i"),

@@ -38,10 +38,15 @@ Relative time terms are anchored to AS_OF, the fixed "today" of the sample data
 """
 
 import argparse
+import os
 import re
 import sqlite3
 import sys
+from datetime import date, datetime, timezone
 from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "db"))
+from dialect import DIALECT  # noqa: E402  (db/dialect.py, standard library only)
 
 ROOT = Path(__file__).resolve().parent.parent
 SCHEMA_PATH = ROOT / "db" / "schema.sql"
@@ -51,8 +56,15 @@ META_DDL = """
 DROP TABLE IF EXISTS meta_tables;
 DROP TABLE IF EXISTS meta_columns;
 DROP TABLE IF EXISTS meta_glossary;
+DROP TABLE IF EXISTS meta_settings;
 DROP TABLE IF EXISTS meta_metrics;
 DROP TABLE IF EXISTS meta_joins;
+
+-- settings the catalog was built with (as_of = the date relative time terms are anchored to)
+CREATE TABLE meta_settings (
+    key    TEXT PRIMARY KEY,
+    value  TEXT NOT NULL
+) STRICT;
 
 CREATE TABLE meta_tables (
     table_name   TEXT PRIMARY KEY,
@@ -267,14 +279,50 @@ COLUMN_SYNONYMS = {
 # -----------------------------------------------------------------------------
 #  Glossary: the semantic layer
 # -----------------------------------------------------------------------------
-AS_OF = "2026-09-28"  # fixed "today" of the sample data; must match NOW in db/seed.py
+SAMPLE_AS_OF = "2026-09-28"  # the fixed "today" of the sample data; must match NOW in db/seed.py
+
+
+def _as_of_setting():
+    """
+    The catalog's "today". Default: the sample data's fixed date. Set AS_OF=YYYY-MM-DD (or
+    AS_OF=today for the real clock) when building the catalog over real data; the relative
+    time hints ("last month", "overdue", ...) are written with this date, and the agent and
+    the API read it back from meta_settings, so everything agrees on one date.
+    """
+    value = (os.getenv("AS_OF") or "").strip().lower()
+    if not value:
+        return SAMPLE_AS_OF
+    if value == "today":
+        return datetime.now(timezone.utc).date().isoformat()
+    try:
+        return date.fromisoformat(value).isoformat()
+    except ValueError:
+        sys.exit(f"AS_OF must be YYYY-MM-DD or 'today', not {value!r}")
+
+
+AS_OF = _as_of_setting()
+
+
+def catalog_as_of(conn):
+    """The as-of date the connected database's catalog was built with (falls back to AS_OF)."""
+    try:
+        row = conn.execute("SELECT value FROM meta_settings WHERE key = 'as_of'").fetchone()
+    except sqlite3.Error:
+        row = None
+    return row[0] if row else AS_OF
+
+
 OPEN_STATUSES = "i.status IN ('New', 'In Progress', 'On Hold')"
-RESOLVED_LATE = "(julianday(i.resolved_at) - julianday(i.opened_at)) * 1440 > s.target_minutes"
+RESOLVED_LATE = f"{DIALECT.minutes_between('i.resolved_at', 'i.opened_at')} > s.target_minutes"
 
 
 def window(start, end):
-    """A time-window condition on {time_column} between two SQLite date() expressions."""
-    return f"{{time_column}} >= date({start}) AND {{time_column}} < date({end})"
+    """
+    A time-window condition on {time_column}: start and end are (base, *modifiers) tuples
+    for DIALECT.date_from, e.g. (AS_OF, "start of month", "-1 month").
+    """
+    return (f"{{time_column}} >= {DIALECT.date_from(repr(start[0]), *start[1:])} "
+            f"AND {{time_column}} < {DIALECT.date_from(repr(end[0]), *end[1:])}")
 
 
 def term(term, kind, synonyms, definition, sql_hint=None, metric_name=None,
@@ -318,7 +366,8 @@ GLOSSARY = [
 
     # --- incident status -----------------------------------------------------
     term("open incident", "value", "open, active, outstanding, unresolved, backlog, in flight",
-         "An incident not yet resolved: New, In Progress or On Hold. Cancelled is not open.",
+         "An incident not yet resolved: always all three statuses New, In Progress and On Hold "
+         "(never leave On Hold out). Cancelled is not open.",
          OPEN_STATUSES, related_columns="incidents.status"),
     term("on hold", "value", "paused, waiting, on hold",
          "An open incident that is paused, for example waiting on the user or a supplier.",
@@ -343,7 +392,7 @@ GLOSSARY = [
     term("overdue", "value", "past due, aging, breaching now, over target",
          "An open incident that has already been open longer than its SLA target "
          f"as of {AS_OF}. Needs the sla_targets join. Not part of sla_breach_rate.",
-         f"{OPEN_STATUSES} AND (julianday('{AS_OF}') - julianday(i.opened_at)) * 1440 "
+         f"{OPEN_STATUSES} AND {DIALECT.minutes_between(repr(AS_OF), 'i.opened_at')} "
          "> s.target_minutes",
          related_columns="incidents.status, incidents.opened_at, sla_targets.target_minutes",
          ambiguity="Some users say 'overdue' when they mean breached (resolved late). This "
@@ -359,6 +408,11 @@ GLOSSARY = [
     term("low-risk change", "value", "low risk, minor change",
          "A change assessed as Low risk.",
          "c.risk = 'Low'", related_columns="changes.risk"),
+    term("scheduled for", "value", "scheduled in, planned for, planned in, booked for, due in",
+         "A change is scheduled for a time window when its planned_start falls in that window "
+         "and it is not cancelled. The window filters c.planned_start; do not filter on "
+         "c.status = 'Scheduled' (a change in Assess or Draft with a booked window still counts).",
+         "c.status <> 'Cancelled'", related_columns="changes.planned_start, changes.status"),
     term("upcoming change", "value", "upcoming, future change, planned changes, next changes",
          f"A change whose window starts on or after {AS_OF} and is not cancelled.",
          f"c.planned_start >= '{AS_OF}' AND c.status <> 'Cancelled'",
@@ -401,31 +455,31 @@ GLOSSARY = [
          "('last month', 'this week') count from this date, not the real clock."),
     term("last month", "time", "previous month, prior month",
          "The previous calendar month.",
-         window(f"'{AS_OF}', 'start of month', '-1 month'", f"'{AS_OF}', 'start of month'")),
+         window((AS_OF, "start of month", "-1 month"), (AS_OF, "start of month"))),
     term("this month", "time", "month to date, MTD, current month",
          "The current calendar month up to the as-of date.",
-         window(f"'{AS_OF}', 'start of month'", f"'{AS_OF}', 'start of month', '+1 month'")),
+         window((AS_OF, "start of month"), (AS_OF, "start of month", "+1 month"))),
     term("last week", "time", "previous week, prior week",
          "The previous Monday-to-Sunday week.",
-         window(f"'{AS_OF}', '-6 days', 'weekday 1', '-7 days'",
-                f"'{AS_OF}', '-6 days', 'weekday 1'")),
+         window((AS_OF, "-6 days", "weekday 1", "-7 days"), (AS_OF, "-6 days", "weekday 1"))),
     term("next week", "time", "coming week, following week",
          "The next Monday-to-Sunday week after the current one.",
-         window(f"'{AS_OF}', '-6 days', 'weekday 1', '+7 days'",
-                f"'{AS_OF}', '-6 days', 'weekday 1', '+14 days'"),
+         window((AS_OF, "-6 days", "weekday 1", "+7 days"), (AS_OF, "-6 days", "weekday 1", "+14 days")),
          ambiguity=f"{AS_OF} is a Monday, so 'next week' could mean this week "
                    "(the next 7 days) or the following calendar week. The hint uses the "
                    "following calendar week."),
     term("last 30 days", "time", "past 30 days, past month, recent",
          "The 30 days before the as-of date.",
-         window(f"'{AS_OF}', '-30 days'", f"'{AS_OF}'")),
+         window((AS_OF, "-30 days"), (AS_OF,))),
     term("this year", "time", "year to date, YTD, current year",
          "The current calendar year up to the as-of date.",
-         window(f"'{AS_OF}', 'start of year'", f"'{AS_OF}', 'start of year', '+1 year'")),
+         window((AS_OF, "start of year"), (AS_OF, "start of year", "+1 year"))),
 
     # --- not answerable from this data ---------------------------------------
-    term("assignee", "concept", "assigned to, owner, who fixed, who resolved, "
-                                "engineer on the ticket",
+    # "assigned to" is deliberately NOT a synonym: "incidents assigned to Network" is a team
+    # question (answerable). Only wording about a person triggers the refusal.
+    term("assignee", "concept", "assigned person, assigned engineer, owner, who fixed, "
+                                "who resolved, who is working on, engineer on the ticket",
          "The person working an incident. Not stored: incidents link to a team, not a "
          "person. Answer at team level instead.", answerable=False),
     term("caller", "concept", "requester, reported by, raised by, customer",
@@ -522,7 +576,7 @@ GLOSSARY_FIELDS = ["term", "kind", "synonyms", "definition", "sql_hint", "metric
 # -----------------------------------------------------------------------------
 #  Metric definitions (reusable SQL fragments, base alias i = incidents)
 # -----------------------------------------------------------------------------
-RESOLUTION_MINUTES = "(julianday(i.resolved_at) - julianday(i.opened_at)) * 1440"
+RESOLUTION_MINUTES = DIALECT.minutes_between("i.resolved_at", "i.opened_at")
 FINISHED = "i.status IN ('Resolved', 'Closed')"
 
 METRICS = [
@@ -570,7 +624,10 @@ METRICS = [
         "filters": None,
         "time_column": "i.opened_at",
         "notes": "Denominator is all incidents, including open and cancelled ones that "
-                 "cannot have been reopened yet. Multiply by 100 for a percentage.",
+                 "cannot have been reopened yet. Rate or percentage questions: report "
+                 "ROUND(100.0 * <sql_expression>, 1) as a percentage. 'How many reopened' "
+                 "questions: report the count SUM(CASE WHEN i.reopened_count > 0 THEN 1 ELSE 0 "
+                 "END), never multiplied by 100.",
     },
 ]
 METRIC_FIELDS = ["metric_name", "description", "unit", "base_table", "base_alias",
@@ -823,12 +880,15 @@ def main():
             "INSERT INTO meta_tables VALUES (?, ?, ?)",
             [(t, d, g) for t, (d, g) in TABLE_DRAFTS.items()])
         conn.executemany("INSERT INTO meta_joins VALUES (?, ?, ?, ?, ?, ?)", JOINS)
+        conn.executemany("INSERT INTO meta_settings VALUES (?, ?)",
+                         [("as_of", AS_OF), ("dialect", DIALECT.name),
+                          ("built_at", datetime.now(timezone.utc).isoformat(timespec="seconds"))])
         conn.executemany(
             f"INSERT INTO meta_glossary ({', '.join(GLOSSARY_FIELDS)}) "
             f"VALUES ({', '.join('?' for _ in GLOSSARY_FIELDS)})",
             [[g[f] for f in GLOSSARY_FIELDS] for g in GLOSSARY])
 
-    print(f"Built semantic catalog in {db_path.name}")
+    print(f"Built semantic catalog in {db_path.name} (as of {AS_OF})")
     for table in ["meta_tables", "meta_columns", "meta_glossary", "meta_metrics", "meta_joins"]:
         count = conn.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]
         print(f"  {table:<14} {count:>3}")

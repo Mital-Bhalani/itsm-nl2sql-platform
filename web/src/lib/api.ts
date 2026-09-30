@@ -31,6 +31,9 @@ export type Health = {
 
 export type Cell = string | number | null
 
+/** One earlier exchange of the current Ask thread, sent back so follow-up questions have context. */
+export type AskTurn = { question: string; sql: string | null }
+
 export type AskResult = {
   question: string
   answer: string | null
@@ -189,6 +192,21 @@ export type EvalJob = {
   results: EvalResult[]
 }
 
+export type EvalSummary = Omit<EvalJob, 'results'>
+
+export type EvalQuestionHistory = {
+  id: string
+  question: string
+  category: string
+  runs: number
+  passed: number
+  pass_rate: number
+  last_status: string
+  failures: { job_id: string; started_at: string; status: string; error: string | null }[]
+}
+
+export type EvalHistory = { runs: EvalSummary[]; questions: EvalQuestionHistory[] }
+
 export class ApiError extends Error {}
 
 const API_KEY = import.meta.env.VITE_APP_API_KEY as string | undefined
@@ -232,7 +250,7 @@ export const api = {
     request<{ as_of: string; row_counts: Record<string, number>; catalog_counts: Record<string, number>; incidents_from: string; incidents_to: string }>(
       `/api/overview${query({ dataset })}`,
     ),
-  ask: (body: { question: string; provider?: string; model?: string; dataset: string }) =>
+  ask: (body: { question: string; provider?: string; model?: string; dataset: string; history?: AskTurn[] }) =>
     request<AskResult>('/api/ask', { method: 'POST', body: JSON.stringify(body) }),
   feedback: (body: { request_id: string; rating: 'up' | 'down'; question?: string }) =>
     request<{ recorded: boolean }>('/api/feedback', { method: 'POST', body: JSON.stringify(body) }),
@@ -254,4 +272,6 @@ export const api = {
   startEval: (body: { golden: string; mode: string; provider?: string; model?: string }) =>
     request<EvalJob>('/api/evals', { method: 'POST', body: JSON.stringify(body) }),
   evalJob: (id: string) => request<EvalJob>(`/api/evals/${id}`),
+  listEvals: () => request<EvalSummary[]>('/api/evals'),
+  evalHistory: (golden: string, limit = 20) => request<EvalHistory>(`/api/evals/history${query({ golden, limit })}`),
 }

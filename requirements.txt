@@ -7,9 +7,8 @@ anthropic==1.9.0        # runtime: the second model provider (Claude); uses http
 python-dotenv==1.0.1    # loads OPENAI_API_KEY from .env (agent/naive_spike.py reads .env itself)
 pyyaml==6.0.2           # evals/run_evals.py reads evals/golden_set.yaml
 httpx==0.27.2          # openai 1.51.2 breaks on httpx>=0.28 ("unexpected keyword argument 'proxies'")
-# Application: API (FastAPI) and UI (Streamlit; brings pandas and altair)
+# Application: API (FastAPI); the React UI in web/ is built with npm
 fastapi==0.141.1
 uvicorn==0.54.0
-streamlit==1.64.0
 # Tests
 pytest==9.1.1
