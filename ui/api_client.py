@@ -6,6 +6,7 @@ calls a language model itself; everything goes through the API.
     APP_API_KEY   sent as X-API-Key when set
 """
 
+import html
 import os
 import sys
 from pathlib import Path
@@ -97,7 +98,7 @@ def setup(title):
 
 def hero(title, subtitle):
     """Page header band used at the top of every page."""
-    st.html(f"<div class='hero'><h1>{title}</h1><p>{subtitle}</p></div>")
+    st.html(f"<div class='hero'><h1>{html.escape(title)}</h1><p>{html.escape(subtitle)}</p></div>")
 
 
 PRIORITY_COLORS = {1: "#DC2626", 2: "#EA580C", 3: "#CA8A04", 4: "#16A34A"}
@@ -106,8 +107,9 @@ STATUS_COLORS = {"New": "#2563EB", "In Progress": "#7C3AED", "On Hold": "#CA8A04
 
 
 def pill(text, color):
+    """A coloured label. text is escaped (it can come from the database); color is ours."""
     return (f"<span class='pill' style='background:{color}1A;color:{color};"
-            f"border:1px solid {color}55'>{text}</span>")
+            f"border:1px solid {color}55'>{html.escape(str(text))}</span>")
 
 
 def sidebar():

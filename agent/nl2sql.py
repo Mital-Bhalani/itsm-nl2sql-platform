@@ -59,10 +59,30 @@ class UnsafeSQL(ValueError):
 # -----------------------------------------------------------------------------
 #  Database access (read-only, personal data blocked)
 # -----------------------------------------------------------------------------
-def _authorizer(action, arg1, arg2, _db, _trigger):
+# Allow-list: a query may only select, read columns, call functions and recurse. Everything
+# else (pragma table functions such as pragma_database_list, which reveal server file paths;
+# ATTACH; writes) is denied even if it slips past the keyword check in guard_sql.
+ALLOWED_ACTIONS = {sqlite3.SQLITE_SELECT, sqlite3.SQLITE_READ, sqlite3.SQLITE_FUNCTION,
+                   sqlite3.SQLITE_RECURSIVE}
+BLOCKED_FUNCTIONS = {"load_extension", "readfile", "writefile", "edit", "fts3_tokenizer"}
+MAX_VALUE_BYTES = 1_000_000     # longest string/blob a query may build (stops zeroblob(1e9))
+MAX_SQL_BYTES = 100_000
+HEAP_LIMIT_BYTES = 512 * 1024 * 1024
+
+
+def _denial(action, arg1, arg2):
+    """Why an action is refused, or None when it is allowed."""
+    if action not in ALLOWED_ACTIONS:
+        return "query uses a statement or system function that is not allowed"
     if action == sqlite3.SQLITE_READ and (arg1, arg2) in PII_COLUMNS:
-        return sqlite3.SQLITE_DENY
-    return sqlite3.SQLITE_OK
+        return "query reads personal data (users.name)"
+    if action == sqlite3.SQLITE_FUNCTION and (arg2 or "").lower() in BLOCKED_FUNCTIONS:
+        return f"function {arg2}() is not allowed"
+    return None
+
+
+def _authorizer(action, arg1, arg2, _db, _trigger):
+    return sqlite3.SQLITE_DENY if _denial(action, arg1, arg2) else sqlite3.SQLITE_OK
 
 
 def connect_readonly(db_path=None, check_same_thread=True):
@@ -70,32 +90,55 @@ def connect_readonly(db_path=None, check_same_thread=True):
     Open the database read-only; defaults to db/tickets.sqlite. The API passes
     check_same_thread=False: each request owns its connection and uses it one step at a time,
     but FastAPI may open it and use it on different worker threads.
+
+    Limits stop a single query from exhausting memory: values are capped at MAX_VALUE_BYTES,
+    SQL text at MAX_SQL_BYTES, no other database may be attached, and SQLite's heap is capped.
     """
     path = Path(db_path).resolve() if db_path else DB_PATH
     if not path.exists():
-        raise FileNotFoundError(f"{path} not found. Run: python db/seed.py && "
+        raise FileNotFoundError(f"{path.name} not found. Run: python db/seed.py && "
                                 "python semantics/build_catalog.py")
-    return sqlite3.connect(f"file:{path.as_posix()}?mode=ro", uri=True,
+    conn = sqlite3.connect(f"file:{path.as_posix()}?mode=ro", uri=True,
                            check_same_thread=check_same_thread)
+    conn.setlimit(sqlite3.SQLITE_LIMIT_LENGTH, MAX_VALUE_BYTES)
+    conn.setlimit(sqlite3.SQLITE_LIMIT_SQL_LENGTH, MAX_SQL_BYTES)
+    conn.setlimit(sqlite3.SQLITE_LIMIT_ATTACHED, 0)
+    conn.execute(f"PRAGMA hard_heap_limit = {HEAP_LIMIT_BYTES}")
+    return conn
 
 
 def run_sql(conn, sql, timeout_ms=QUERY_TIMEOUT_MS):
     """
-    Execute guarded SQL read-only. Returns (columns, rows). Reading users.name raises UnsafeSQL;
-    running longer than timeout_ms raises sqlite3.OperationalError.
+    Execute guarded SQL read-only. Returns (columns, rows), at most MAX_ROWS rows whatever LIMIT
+    the SQL has. Reading users.name or using a non-SELECT action raises UnsafeSQL; running
+    longer than timeout_ms or needing too much memory raises sqlite3.OperationalError.
     """
     deadline = time.monotonic() + timeout_ms / 1000
-    conn.set_authorizer(_authorizer)
+    denied = []
+
+    def authorizer(action, arg1, arg2, _db, _trigger):
+        reason = _denial(action, arg1, arg2)
+        if reason:
+            denied.append(reason)
+            return sqlite3.SQLITE_DENY
+        return sqlite3.SQLITE_OK
+
+    conn.set_authorizer(authorizer)
     conn.set_progress_handler(lambda: 1 if time.monotonic() > deadline else 0, 10_000)
     try:
         cur = conn.execute(sql)
-        return [d[0] for d in cur.description], [list(r) for r in cur.fetchall()]
+        return [d[0] for d in cur.description], [list(r) for r in cur.fetchmany(MAX_ROWS)]
+    except MemoryError as exc:
+        raise sqlite3.OperationalError("query needs too much memory") from exc
     except sqlite3.DatabaseError as exc:
         message = str(exc).lower()
-        if "prohibited" in message or "not authorized" in message:  # raised by _authorizer
-            raise UnsafeSQL("query reads personal data (users.name)") from exc
+        if denied or "prohibited" in message or "not authorized" in message:
+            raise UnsafeSQL(denied[0] if denied else "query is not allowed") from exc
         if "interrupted" in message:
             raise sqlite3.OperationalError(f"query timed out after {timeout_ms / 1000:g} s") from exc
+        if "too big" in message:
+            raise sqlite3.OperationalError(
+                f"query builds a value larger than {MAX_VALUE_BYTES:,} bytes") from exc
         raise
     finally:
         conn.set_authorizer(None)

@@ -59,7 +59,7 @@ column lists only what that day introduced.
 | 5 | Multi-model: OpenAI and Anthropic Claude, switchable per question, with fallback | Anthropic SDK (Claude Opus 5.5), python-dotenv | ✅ Done |
 | 6 | HTTP API: ask, KPIs, table explorer, incidents, catalog, evals, SQL console, UI-vs-database check; API key, rate limit, audit log | FastAPI, Uvicorn, Pydantic | ✅ Done |
 | 7 | Streamlit UI: Ask, Dashboard, Explorer, Incident, Catalog, Evals, Data check | Streamlit, pandas, Altair | ✅ Done |
-| 8 | React UI with the same pages, served by the API at `/web/`; automated test suite (50 tests) | React 19, TypeScript, Vite, Tailwind CSS 4, TanStack Query, Recharts, pytest | ✅ Done |
+| 8 | React UI with the same pages, served by the API at `/web/`; automated test suite (69 tests) | React 19, TypeScript, Vite, Tailwind CSS 4, TanStack Query, Recharts, pytest | ✅ Done |
 
 ## Quick start
 
@@ -216,9 +216,13 @@ exists, no phrase maps to two meanings, and plural phrases ("tickets", "P1s") re
 ## Safety rules
 
 Enforced in the agent and the API: **read-only** database · **one SELECT only** ·
-**automatic `LIMIT 1000`** · **5-second query timeout** · **no personal data** (`users.name`
-blocked and masked) · questions about data that does not exist are **refused** · optional API
-key, per-client rate limit and an **audit log** of every question with its SQL and model.
+**at most 1,000 rows** · **5-second query timeout** · **size and memory limits** per query ·
+**no system functions** (an allow-list decides what a query may do) · **no personal data**
+(`users.name` blocked and masked) · questions about data that does not exist are **refused** ·
+optional API key, per-client rate limits, **allow-listed models**, API keys **redacted** from
+errors, browser **security headers** and an **audit log** of every question with its SQL and
+model. Details in [api/README.md](api/README.md#safety); every known attack is a test in
+`tests/test_security.py`.
 
 ## Tech stack
 

@@ -6,6 +6,10 @@ Start the whole application: the API (FastAPI on port 8000) and the UI (Streamli
 
 Ctrl+C stops both. The database must exist first:
     python db/seed.py && python semantics/build_catalog.py
+
+Binding to anything other than this computer (--host 0.0.0.0 or a network address) is refused
+unless APP_API_KEY is set, because the API would otherwise be open to the whole network. Even
+then the Streamlit UI has no login of its own: put it behind a login proxy or keep it local.
 """
 
 import argparse
@@ -17,6 +21,7 @@ import urllib.request
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent
+LOCAL_HOSTS = {"127.0.0.1", "localhost", "::1"}
 
 
 def wait_for(url, seconds=30):
@@ -37,6 +42,16 @@ def main():
     parser.add_argument("--ui-port", type=int, default=8501)
     parser.add_argument("--host", default="127.0.0.1", help="interface to bind (default local only)")
     args = parser.parse_args()
+
+    sys.path.insert(0, str(ROOT / "agent"))
+    from llm import load_env
+    load_env()
+    if args.host not in LOCAL_HOSTS:
+        if not os.getenv("APP_API_KEY"):
+            sys.exit(f"Refusing to listen on {args.host}: set APP_API_KEY in .env first, otherwise "
+                     "anyone on the network can query the data and spend your model credit.")
+        print(f"WARNING: listening on {args.host}. The API needs X-API-Key, but the Streamlit UI "
+              "has no login; anyone who can reach it can use it.", flush=True)
 
     if not (ROOT / "db" / "tickets.sqlite").exists():
         sys.exit("db/tickets.sqlite is missing. Run: python db/seed.py && python semantics/build_catalog.py")

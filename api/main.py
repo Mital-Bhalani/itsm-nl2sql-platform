@@ -24,13 +24,16 @@ Endpoints (JSON; interactive docs at /docs):
     POST /api/evals                    start an eval run (self-test or live)
     GET  /api/evals/{job_id}           progress and results of an eval run
 
-Security: read-only database, SELECT-only guarded SQL, users.name masked/blocked, optional
-X-API-Key (APP_API_KEY), per-client rate limit on /api/ask, every question audited to
-logs/audit.jsonl.
+Security: read-only database with an allow-list authorizer and size limits, SELECT-only guarded
+SQL capped at 1,000 rows, users.name masked/blocked, optional X-API-Key (APP_API_KEY), per-IP
+rate limits on /api/ask, /api/sql, /api/evals and /api/feedback, at most MAX_RUNNING_JOBS eval
+runs at once, models limited to llm.allowed_models(), provider errors with API keys redacted,
+browser security headers, every question audited to logs/audit.jsonl.
 """
 
 import json
 import logging
+import re
 import secrets
 import sqlite3
 import sys
@@ -70,9 +73,26 @@ app.add_middleware(CORSMiddleware, allow_origins=settings.cors_origins, allow_me
 # -----------------------------------------------------------------------------
 #  Middleware, auth, rate limit, audit
 # -----------------------------------------------------------------------------
+REQUEST_ID = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
+SECURITY_HEADERS = {
+    "X-Content-Type-Options": "nosniff",
+    "X-Frame-Options": "DENY",
+    "Referrer-Policy": "no-referrer",
+    "Cross-Origin-Opener-Policy": "same-origin",
+    "Permissions-Policy": "camera=(), microphone=(), geolocation=()",
+}
+# The React app loads its own scripts, Google Fonts, and inline styles (charts); nothing else.
+WEB_CSP = ("default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline' "
+           "https://fonts.googleapis.com; font-src 'self' https://fonts.gstatic.com; "
+           "img-src 'self' data:; connect-src 'self'; object-src 'none'; base-uri 'self'; "
+           "form-action 'self'; frame-ancestors 'none'")
+
+
 @app.middleware("http")
 async def request_context(request: Request, call_next):
-    request_id = request.headers.get("X-Request-ID") or uuid.uuid4().hex[:12]
+    # A caller-supplied id is echoed into logs and headers, so accept only a short plain token.
+    given = request.headers.get("X-Request-ID") or ""
+    request_id = given if REQUEST_ID.match(given) else uuid.uuid4().hex[:12]
     request.state.request_id = request_id
     started = time.perf_counter()
     try:
@@ -83,6 +103,10 @@ async def request_context(request: Request, call_next):
             "detail": "Internal error. Quote this request id when reporting it.",
             "request_id": request_id})
     response.headers["X-Request-ID"] = request_id
+    for name, value in SECURITY_HEADERS.items():
+        response.headers.setdefault(name, value)
+    if request.url.path.startswith("/web"):
+        response.headers["Content-Security-Policy"] = WEB_CSP
     log.info("request_id=%s %s %s -> %s in %d ms", request_id, request.method, request.url.path,
              response.status_code, (time.perf_counter() - started) * 1000)
     return response
@@ -90,8 +114,8 @@ async def request_context(request: Request, call_next):
 
 def require_key(request: Request):
     if settings.api_key:
-        given = request.headers.get("X-API-Key") or ""
-        if not secrets.compare_digest(given, settings.api_key):
+        given = (request.headers.get("X-API-Key") or "").encode("utf-8")
+        if not secrets.compare_digest(given, settings.api_key.encode("utf-8")):
             raise HTTPException(status_code=401, detail="Missing or invalid X-API-Key header")
 
 
@@ -99,18 +123,43 @@ _calls = defaultdict(deque)
 _calls_lock = threading.Lock()
 
 
-def rate_limit(request: Request):
-    client = request.headers.get("X-API-Key") or (request.client.host if request.client else "?")
-    now = time.monotonic()
-    with _calls_lock:
-        window = _calls[client]
-        while window and now - window[0] > 60:
-            window.popleft()
-        if len(window) >= settings.rate_limit_per_min:
-            raise HTTPException(status_code=429, detail=(
-                f"Rate limit: {settings.rate_limit_per_min} questions per minute. Try again shortly."),
-                headers={"Retry-After": str(int(60 - (now - window[0])) + 1)})
-        window.append(now)
+def limiter(bucket):
+    """
+    Per-client sliding-window limit of RATE_LIMIT_PER_MIN calls per minute for one bucket of
+    endpoints. The client is the connecting IP address, never a request header, so changing
+    X-API-Key or other headers does not reset the count.
+    """
+    def rate_limit(request: Request):
+        client = (bucket, request.client.host if request.client else "?")
+        now = time.monotonic()
+        with _calls_lock:
+            for key in [k for k, w in _calls.items() if not w or now - w[-1] > 60]:
+                del _calls[key]  # forget idle clients so the table cannot grow without bound
+            window = _calls[client]
+            while window and now - window[0] > 60:
+                window.popleft()
+            if len(window) >= settings.rate_limit_per_min:
+                raise HTTPException(status_code=429, detail=(
+                    f"Rate limit: {settings.rate_limit_per_min} requests per minute. Try again shortly."),
+                    headers={"Retry-After": str(int(60 - (now - window[0])) + 1)})
+            window.append(now)
+    return rate_limit
+
+
+rate_limit = limiter("ask")
+
+
+def check_model(provider, model):
+    """Only known providers and their allowed models may be requested (stops cost abuse)."""
+    if provider is not None and provider not in llm.PROVIDERS:
+        raise HTTPException(status_code=400, detail=f"Unknown provider '{provider}'")
+    if model is None:
+        return
+    allowed = llm.allowed_models(provider or llm.default_provider())
+    if model not in allowed:
+        raise HTTPException(status_code=400, detail=(
+            f"Model '{model}' is not enabled on this server. Allowed: {', '.join(sorted(allowed))}. "
+            "An administrator can add models with LLM_ALLOWED_MODELS."))
 
 
 _audit_lock = threading.Lock()
@@ -189,8 +238,7 @@ def overview(conn=Depends(db)):
 @app.post("/api/ask", tags=["ask"], response_model=AskResponse,
           dependencies=[Depends(require_key), Depends(rate_limit)])
 def ask(body: AskRequest, request: Request):
-    if body.provider and body.provider not in llm.PROVIDERS:
-        raise HTTPException(status_code=400, detail=f"Unknown provider '{body.provider}'")
+    check_model(body.provider, body.model)
     conn = open_dataset(body.dataset)
     request_id = request.state.request_id
     entry = {"time": datetime.now(timezone.utc).isoformat(timespec="seconds"),
@@ -200,8 +248,10 @@ def ask(body: AskRequest, request: Request):
     try:
         result = nl2sql.ask(body.question, conn, body.provider, body.model, answer=body.answer)
     except llm.AgentAPIError as exc:
-        audit({**entry, "status": "model_error", "error": str(exc)})
-        raise HTTPException(status_code=503, detail=f"The language model could not be reached: {exc}")
+        message = llm.redact(exc)
+        log.warning("model error request_id=%s: %s", request_id, message)
+        audit({**entry, "status": "model_error", "error": message})
+        raise HTTPException(status_code=503, detail=f"The language model could not be reached: {message}")
     finally:
         conn.close()
     status = ("refused" if result["refusal"] else "blocked" if result["unsafe"]
@@ -260,7 +310,8 @@ def similar(incident_id: int, conn=Depends(db), limit: int = Query(5, ge=1, le=2
     return found
 
 
-@app.post("/api/feedback", tags=["ask"], status_code=201, dependencies=[Depends(require_key)])
+@app.post("/api/feedback", tags=["ask"], status_code=201,
+          dependencies=[Depends(require_key), Depends(limiter("feedback"))])
 def feedback(body: FeedbackRequest, request: Request):
     audit({"time": datetime.now(timezone.utc).isoformat(timespec="seconds"), "kind": "feedback",
            "request_id": request.state.request_id, "answer_request_id": body.request_id,
@@ -279,7 +330,7 @@ def reconcile(conn=Depends(db)):
     return services.reconcile(conn)
 
 
-@app.post("/api/sql", tags=["data"], dependencies=[Depends(require_key), Depends(rate_limit)])
+@app.post("/api/sql", tags=["data"], dependencies=[Depends(require_key), Depends(limiter("sql"))])
 def run_sql(body: SqlRequest, request: Request):
     conn = open_dataset(body.dataset)
     entry = {"time": datetime.now(timezone.utc).isoformat(timespec="seconds"),
@@ -303,6 +354,7 @@ def run_sql(body: SqlRequest, request: Request):
 _jobs: dict[str, dict] = {}
 _jobs_lock = threading.Lock()
 MAX_JOBS = 50
+MAX_RUNNING_JOBS = 2  # live runs spend API credit and each holds a thread
 
 
 def _now():
@@ -323,10 +375,11 @@ def _run_eval_job(job, questions, db_path):
         job["execution_accuracy"] = round(job["passed"] / job["total"], 4) if job["total"] else 0.0
         job["status"] = "done"
     except llm.AgentAPIError as exc:
-        job.update(status="failed", error=f"Model call failed after {job['completed']} questions: {exc}")
-    except Exception as exc:  # noqa: BLE001 - report any failure on the job instead of losing it
-        log.exception("eval job %s failed", job["id"])
-        job.update(status="failed", error=f"{type(exc).__name__}: {exc}")
+        job.update(status="failed",
+                   error=f"Model call failed after {job['completed']} questions: {llm.redact(exc)}")
+    except Exception:  # noqa: BLE001 - report any failure on the job instead of losing it
+        log.exception("eval job %s failed", job["id"])  # details stay in the server log
+        job.update(status="failed", error="Internal error while running the evaluation; see the server log.")
     finally:
         job["finished_at"] = _now()
         if conn is not None:
@@ -334,7 +387,7 @@ def _run_eval_job(job, questions, db_path):
 
 
 @app.post("/api/evals", tags=["evals"], response_model=EvalJob, status_code=202,
-          dependencies=[Depends(require_key)])
+          dependencies=[Depends(require_key), Depends(limiter("evals"))])
 def start_eval(body: EvalRunRequest):
     path = settings.golden_sets.get(body.golden)
     if path is None:
@@ -352,12 +405,16 @@ def start_eval(body: EvalRunRequest):
             raise HTTPException(status_code=400, detail=f"Unknown provider '{provider}'")
         if not any(p["name"] == provider and p["configured"] for p in llm.available_providers()):
             raise HTTPException(status_code=400, detail=f"Provider '{provider}' has no API key configured")
+        check_model(provider, body.model)
         model = body.model or llm.default_model(provider)
     job = {"id": uuid.uuid4().hex[:10], "status": "queued", "mode": body.mode, "golden": body.golden,
            "provider": provider, "model": model, "total": len(golden["questions"]), "completed": 0,
            "passed": 0, "execution_accuracy": None, "error": None, "started_at": _now(),
            "finished_at": None, "results": []}
     with _jobs_lock:
+        if sum(j["status"] in ("queued", "running") for j in _jobs.values()) >= MAX_RUNNING_JOBS:
+            raise HTTPException(status_code=429, detail=(
+                f"{MAX_RUNNING_JOBS} evaluations are already running. Wait for one to finish."))
         if len(_jobs) >= MAX_JOBS:
             oldest = min(_jobs.values(), key=lambda j: j["started_at"])
             _jobs.pop(oldest["id"])

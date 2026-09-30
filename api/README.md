@@ -38,12 +38,31 @@ All `/api/*` endpoints take `dataset=default|large`.
 
 ## Safety
 
-- Database opened **read-only**; generated SQL must be one `SELECT`/`WITH`, gets `LIMIT 1000`,
-  and is interrupted after 5 seconds.
-- `users.name` is **masked** in the explorer and **blocked** by a SQLite authorizer everywhere.
+- Database opened **read-only**; generated and console SQL must be one `SELECT`/`WITH`, gets
+  `LIMIT 1000`, never returns more than 1,000 rows (even with its own larger `LIMIT`), and is
+  interrupted after 5 seconds.
+- A SQLite **allow-list authorizer** permits only reading tables, calling functions and
+  recursion. Pragma table functions (`pragma_database_list` revealed the server's file path),
+  `ATTACH`, writes and `load_extension()` are refused.
+- **Size limits** per connection: no value over 1 MB (stops `zeroblob`/`hex` memory bombs),
+  SQL text up to 100 KB, no attached databases, SQLite heap capped at 512 MB.
+- `users.name` is **masked** in the explorer and **blocked** by the authorizer everywhere.
 - Explorer table and column names come only from the `meta_*` catalog; values are bound parameters.
-- `APP_API_KEY` set → `X-API-Key` header required on `/api/*` (`/health` stays open).
-- `/api/ask` is rate-limited per client (`RATE_LIMIT_PER_MIN`, default 30).
+- `APP_API_KEY` set → `X-API-Key` header required on `/api/*` (`/health` stays open); compared in
+  constant time.
+- **Rate limits** per client IP (`RATE_LIMIT_PER_MIN`, default 30), separately for `/api/ask`,
+  `/api/sql`, `/api/evals` and `/api/feedback`. The client is the connecting address, so sending
+  a different `X-API-Key` each time does not reset the count.
+- **Models are allow-listed**: only each provider's configured default (plus `LLM_ALLOWED_MODELS`)
+  can be requested, so a caller cannot run up the bill on an expensive model. At most 2 eval
+  runs at once.
+- Provider error messages have **API keys redacted** before they reach the client or the log.
+- Browser **security headers** on every response (`nosniff`, `X-Frame-Options: DENY`,
+  `Referrer-Policy: no-referrer`) and a strict **Content-Security-Policy** on the React UI.
+- `X-Request-ID` from the caller is accepted only as a short plain token.
 - Every question is appended to `logs/audit.jsonl` (gitignored): time, client, question, model,
   SQL, outcome, tokens, timings.
 - Unexpected errors return a request id, never a stack trace.
+- `run_app.py --host <non-local>` refuses to start without `APP_API_KEY`. The Streamlit UI has no
+  login of its own: keep it local or put it behind a login proxy.
+- Tests: `tests/test_security.py` (each known attack, run as a regression test).

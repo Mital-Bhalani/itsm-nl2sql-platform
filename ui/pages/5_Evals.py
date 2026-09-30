@@ -1,5 +1,6 @@
 """Evals: score the agent against a golden set, per model, and compare runs."""
 
+import html
 import time
 
 import pandas as pd
@@ -18,7 +19,7 @@ with st.form("run"):
     golden = c1.selectbox("Golden set", ["golden_set.yaml", "golden_set_large.yaml"])
     mode = c2.radio("Mode", ["self-test", "live"], horizontal=True)
     provider, model = current_model()
-    c3.markdown(f"**Model for live runs**  \n{provider} / {model}  \n"
+    c3.markdown(f"**Model for live runs**  \n{html.escape(str(provider))} / {html.escape(str(model))}  \n"
                 "<small>change it in the sidebar</small>", unsafe_allow_html=True)
     submitted = st.form_submit_button("Run evaluation", type="primary")
 

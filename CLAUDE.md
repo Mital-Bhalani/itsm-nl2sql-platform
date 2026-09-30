@@ -29,7 +29,7 @@ python evals/run_evals.py           # score the agent on evals/golden_set.yaml (
 python agent/naive_spike.py         # Day 1 naive spike (no context; shows why the agent is needed)
 python run_app.py                   # API :8000 (/docs) + Streamlit UI :8501, Ctrl+C stops both
 cd web && npm run build            # React UI -> web/dist, served by the API at /web/ (npm run dev: :5173)
-python -B -m pytest tests -p no:cacheprovider   # 50 tests, no API key, temp DB outside repo
+python -B -m pytest tests -p no:cacheprovider   # 69 tests, no API key, temp DB outside repo
 ```
 
 Slash commands: `/smoke` (rebuild + checks), `/build-catalog` (rebuild catalog, report
@@ -86,7 +86,7 @@ read-only · **SELECT-only** · auto-LIMIT · **no raw PII in output** (`users.n
 | `api/` | 3 | **done**: FastAPI (`main.py`, `services.py`, `schemas.py`, `config.py`) |
 | `ui/` | 4 | **done**: Streamlit `Home.py` + `pages/1_Ask … 7_Incident`, `api_client.py`, `assets/` |
 | `web/` | 4+ | **done**: React 19 + TS + Tailwind 4 + TanStack Query + Recharts; built to `web/dist`, served at `/web/` |
-| `tests/` | — | **done**: pytest, 50 tests (guardrails, providers, API with a fake model) |
+| `tests/` | — | **done**: pytest, 69 tests (guardrails, providers, API with a fake model, security attacks) |
 
 `scripts/`, `docs/` and `spike/` from the original plan were not created: the data generator
 lives in `db/seed.py` and the spike in `agent/naive_spike.py`. There is no `db/build_db.py`.
@@ -245,6 +245,20 @@ covered only by mocked tests.
   `/api/sql` (`RATE_LIMIT_PER_MIN`, default 30); audit log `logs/audit.jsonl` (gitignored);
   explorer names whitelisted from `meta_columns`, values bound; `users.name` masked and
   authorizer-blocked.
+- **Security hardening (2026-09-30)**, each attack a test in `tests/test_security.py`:
+  (1) `SELECT * FROM pragma_database_list` in the SQL console returned the server's full file
+  path (the regex guard only blocks the word `pragma`, not `pragma_*` functions) - the authorizer
+  is now an **allow-list** (SELECT, READ, FUNCTION, RECURSIVE; `load_extension` denied);
+  (2) a query's own `LIMIT 3000000` returned 3M rows - `run_sql` uses `fetchmany(MAX_ROWS)`;
+  (3) `zeroblob`/`hex` built 400 MB values - `connect_readonly` sets `SQLITE_LIMIT_LENGTH` 1 MB,
+  SQL length 100 KB, no ATTACH, `hard_heap_limit` 512 MB; (4) rate limit keyed on the
+  caller-supplied `X-API-Key`, so rotating it bypassed the limit - now keyed on client IP, per
+  bucket (ask, sql, evals, feedback); (5) any `model` string accepted (cost abuse) - allow-list
+  `llm.allowed_models()` + `LLM_ALLOWED_MODELS`; (6) OpenAI auth errors echo part of the key -
+  `llm.redact()`; (7) eval runs unlimited - rate limit + `MAX_RUNNING_JOBS = 2`; plus security
+  headers and a CSP on `/web`, sanitised `X-Request-ID`, bytes-safe key compare, HTML-escaped
+  Streamlit pills, and `run_app.py` refuses a non-local `--host` without `APP_API_KEY`.
+  Still open: the Streamlit UI has no login (keep it local); `/docs` and `/health` are public.
 - UI talks only to the API. Sidebar: dataset, provider, model (kept across pages), connected
   DB file + last-changed time, **Refresh from database** (UI caches API answers 10 s).
   Ask page can **compare two models** side by side, draws a chart automatically, offers three
