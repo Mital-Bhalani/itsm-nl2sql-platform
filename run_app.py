@@ -44,7 +44,7 @@ def main():
     args = parser.parse_args()
 
     sys.path.insert(0, str(ROOT / "agent"))
-    from llm import load_env
+    from llm import load_env  # pyright: ignore[reportMissingImports]
     load_env()
     if args.host not in LOCAL_HOSTS:
         if not os.getenv("APP_API_KEY"):

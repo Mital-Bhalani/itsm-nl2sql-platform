@@ -6,6 +6,9 @@ A service manager types *"Which teams missed their SLA most last month?"*. The a
 answer in the ticket database and replies in a sentence, with a chart. It also shows exactly how
 it got the number, so nobody has to take it on trust.
 
+> **New here?** The [End-to-End guide](End-to-End/README.md) explains every folder, script and
+> component from the database to the screens.
+
 ## In plain words
 
 - **No SQL, no spreadsheets.** You ask in normal English; the app does the database work.
@@ -168,6 +171,7 @@ python evals/run_evals.py --self-test    # expects 15/15, no API key needed
 ├── ui/                       # Streamlit front end (see ui/README.md)
 ├── web/                      # React + TypeScript front end (see web/README.md)
 ├── docs/images/              # screenshots used in this README
+├── End-to-End/               # complete guide: every folder, script and component, start to finish
 ├── tests/                    # pytest: guardrails, providers, API end to end (fake model)
 ├── run_app.py                # starts the API and the UI together
 ├── CLAUDE.md                 # detailed project memory and handoff notes

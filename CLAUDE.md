@@ -86,6 +86,7 @@ read-only · **SELECT-only** · auto-LIMIT · **no raw PII in output** (`users.n
 | `api/` | 3 | **done**: FastAPI (`main.py`, `services.py`, `schemas.py`, `config.py`) |
 | `ui/` | 4 | **done**: Streamlit `Home.py` + `pages/1_Ask … 7_Incident`, `api_client.py`, `assets/` |
 | `web/` | 4+ | **done**: React 19 + TS + Tailwind 4 + TanStack Query + Recharts; built to `web/dist`, served at `/web/` |
+| `End-to-End/` | — | **done**: 13-chapter project guide (hierarchy, every script/component, request lifecycle, security, operations); update it when code changes |
 | `tests/` | — | **done**: pytest, 69 tests (guardrails, providers, API with a fake model, security attacks) |
 
 `scripts/`, `docs/` and `spike/` from the original plan were not created: the data generator
