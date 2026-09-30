@@ -227,6 +227,17 @@ OPEN_SQL = ("SELECT g.name, COUNT(i.id) FROM assignment_groups g LEFT JOIN incid
      "ON c.assignment_group_id = g.id GROUP BY g.name", "is one number"),
     ("What is the average number of incidents per month?",
      "SELECT COUNT(i.id) / 12.0 FROM incidents i", "fixed number of months"),
+    ("How many incidents does each team have per agent?",
+     "SELECT g.name, COUNT(i.id), COUNT(u.id) FROM assignment_groups g "
+     "LEFT JOIN incidents i ON i.assignment_group_id = g.id "
+     "LEFT JOIN users u ON u.assignment_group_id = g.id GROUP BY g.id", "is a ratio"),
+    ("How many incidents were opened between 9am and 5pm?",
+     "SELECT COUNT(*) FROM incidents i WHERE i.opened_at >= '2026-09-28 09:00:00' "
+     "AND i.opened_at < '2026-09-28 17:00:00'", "applies to every date"),
+    ("Which team has the highest percentage of P1 incidents?",
+     "SELECT g.name, 100.0 * COUNT(i.id) / SUM(COUNT(i.id)) OVER () FROM assignment_groups g "
+     "LEFT JOIN incidents i ON i.assignment_group_id = g.id AND i.priority = 1 GROUP BY g.id",
+     "team's own count over the team's own total"),
 ])
 def test_soft_lint_flags_a_mismatch(conn, question, sql, fragment):
     assert any(fragment in p for p in soft(conn, question, sql))
@@ -241,6 +252,13 @@ def test_soft_lint_flags_a_mismatch(conn, question, sql, fragment):
      "SELECT i.id FROM incidents i ORDER BY i.opened_at DESC LIMIT 5"),
     ("How many incidents are there?", "SELECT COUNT(*) FROM incidents i"),
     ("Show the average resolution time", "SELECT AVG(1.0) FROM incidents i"),
+    ("Which team has the most incidents per agent?",
+     "SELECT g.name FROM assignment_groups g ORDER BY 1.0 * (SELECT COUNT(*) FROM incidents i) / 5"),
+    ("How many incidents were opened at 9am on 2026-09-01?",
+     "SELECT COUNT(*) FROM incidents i WHERE i.opened_at >= '2026-09-01 09:00:00'"),
+    ("What share of all incidents does each team have?",
+     "SELECT g.name, 1.0 * COUNT(i.id) / SUM(COUNT(i.id)) OVER () FROM assignment_groups g "
+     "LEFT JOIN incidents i ON i.assignment_group_id = g.id GROUP BY g.id"),
     ("How many incidents does each team have?",
      "SELECT COUNT(i.id) FROM incidents i GROUP BY i.assignment_group_id"),   # 'each' asks for groups
 ])

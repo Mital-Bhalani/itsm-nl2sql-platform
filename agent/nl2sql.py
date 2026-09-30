@@ -494,6 +494,16 @@ PER_GROUP = re.compile(r"\b(each|per|by|every|grouped)\b", re.I)
 AGGREGATE_ITEM = re.compile(r"\s*(?:count|min|max|sum|avg)\s*\(", re.I)
 AVERAGE_NUMBER_PER = re.compile(r"\b(?:average|mean)\s+(?:number|count)\s+of\b.*\bper\s+\w+", re.I)
 FIXED_DIVISOR = re.compile(r"/\s*12(?:\.0+)?\b")
+PER_AGENT = re.compile(r"\bper\s+agent\b", re.I)
+TIME_OF_DAY = re.compile(r"\b\d{1,2}\s*(?:am|pm)\b|\b\d{1,2}:\d{2}\b", re.I)
+TIMESTAMP_LITERAL = re.compile(r"'\d{4}-\d{2}-\d{2} (?!00:00:00)\d{2}:\d{2}:\d{2}'")
+DATE_IN_QUESTION = re.compile(
+    r"\b\d{4}\b|today|yesterday|tomorrow|january|february|march|april|may|june|july|august|"
+    r"september|october|november|december|\b(?:mon|tues|wednes|thurs|fri|satur|sun)day\b", re.I)
+PERCENT_WORDS = re.compile(r"percent|share|proportion|%", re.I)
+TEAM_WORDS = re.compile(r"\b(?:team|group|queue)s?\b", re.I)
+OVER_ALL_ROWS = re.compile(r"\bover\s*\(\s*\)", re.I)
+OF_TOTAL = re.compile(r"\bof\s+(?:all|the\s+total|total)\b|overall", re.I)
 
 
 def _select_items(scope):
@@ -548,6 +558,23 @@ def lint_question(question, sql, resolved):
             problems.append(
                 "Do not divide by a fixed number of months. Count incidents per calendar month in a "
                 "subquery, then take AVG of those counts over the months that have data.")
+    if PER_AGENT.search(question) and "/" not in top:
+        problems.append(
+            "'X per agent' is a ratio: the team's count divided by the team's number of agents "
+            "(users with role 'agent'). Compute the count and the head count in separate subqueries "
+            "per team, divide them, and return the team with the ratio, not only the two counts.")
+    if (TIME_OF_DAY.search(question) and TIMESTAMP_LITERAL.search(sql)
+            and not DATE_IN_QUESTION.search(question)):
+        problems.append(
+            "A time of day such as 9am or 17:00 applies to every date. Do not compare with the "
+            "timestamp of one day; use the hour of day, CAST(strftime('%H', col) AS INTEGER), "
+            "for example >= 9 AND < 17 for 9am to 5pm (5pm is hour 17).")
+    if (PERCENT_WORDS.search(question) and TEAM_WORDS.search(question) and OVER_ALL_ROWS.search(top)
+            and not OF_TOTAL.search(question)):
+        problems.append(
+            "A percentage per team is the team's own count over the team's own total, for example "
+            "100.0 * SUM(i.priority = 1) / COUNT(*), not the team's share of the grand total "
+            "(SUM(...) OVER ()). Use the share of the grand total only if the question asks for it.")
     if only_aggregates and grouped and HOW_MANY.match(question) and not PER_GROUP.search(question):
         problems.append(
             "The question asks for one number, but GROUP BY makes the SQL return one unlabelled row "

@@ -74,4 +74,4 @@ A 50,000-incident version exists for scale testing. Details in
 | AI | OpenAI (`gpt-4o-mini`, default) or Anthropic (`claude-opus-5-5`) |
 | Backend | FastAPI, Uvicorn, Pydantic |
 | Front end | React 19, TypeScript, Vite, Tailwind CSS 4, TanStack Query, Recharts |
-| Quality | pytest (130 tests), Playwright end-to-end (22), golden-set evals (80 questions), GitHub Actions CI |
+| Quality | pytest (136 tests), Playwright end-to-end (22), golden-set evals (80 questions), GitHub Actions CI |

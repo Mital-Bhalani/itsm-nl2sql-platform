@@ -30,7 +30,7 @@ python evals/run_evals.py           # score the agent on evals/golden_set.yaml (
 python agent/naive_spike.py         # Day 1 naive spike (no context; shows why the agent is needed)
 python run_app.py                   # API :8000 (/docs), React UI at :8000/web/, Ctrl+C stops it
 cd web && npm run build            # React UI -> web/dist, served by the API at /web/ (npm run dev: :5173)
-python -B -m pytest tests -p no:cacheprovider   # 130 tests, no API key, temp DB outside repo
+python -B -m pytest tests -p no:cacheprovider   # 136 tests, no API key, temp DB outside repo
 cd web && npm run e2e              # 22 Playwright checks in Edge; starts its own API on :8010 (E2E_PORT=8000 reuses a running one)
 ```
 
@@ -93,7 +93,7 @@ read-only · **SELECT-only** · auto-LIMIT · **no raw PII in output** (`users.n
 | `api/` | 3 | **done**: FastAPI (`main.py`, `services.py`, `schemas.py`, `config.py`, `state.py` = SQLite store for rate limits and eval jobs) |
 | `web/` | 4 | **done**: React 19 + TS + Tailwind 4 + TanStack Query + Recharts; built to `web/dist`, served at `/web/` |
 | `End-to-End/` | — | **done**: 11-chapter project guide (hierarchy, every script/component, request lifecycle, security, operations); update it when code changes |
-| `tests/` | — | **done**: pytest, 130 tests (guardrails, SQL lint, providers, dialect, API with a fake model, state store, security attacks) + `web/e2e` Playwright (22) |
+| `tests/` | — | **done**: pytest, 136 tests (guardrails, SQL lint, providers, dialect, API with a fake model, state store, security attacks) + `web/e2e` Playwright (22) |
 
 `scripts/`, `docs/` and `spike/` from the original plan were not created: the data generator
 lives in `db/seed.py` and the spike in `agent/naive_spike.py`. There is no `db/build_db.py`.
@@ -228,7 +228,10 @@ byte-identically).
    trigger one repair call but never block: an open-status filter nobody asked for ("P1 incidents",
    "recently opened" is a date, not the status open), `status <> 'Cancelled'` nobody asked for,
    "show/list" answered with one aggregate (MIN/COUNT instead of rows), "how many teams..." answered
-   with one row per team, "average number of X per Y" returned per group or divided by a fixed 12.
+   with one row per team, "average number of X per Y" returned per group or divided by a fixed 12,
+   "X per agent" returned as two counts instead of a ratio, a time of day ("9am to 5pm") compared
+   with one day's timestamp instead of the hour of day, and a per-team percentage computed as the
+   team's share of the grand total (`OVER ()`) instead of its own proportion.
    Follow-up questions skip the soft checks. Glossary terms `median` and `running total` carry the SQL
    recipe (SQLite has no MEDIAN).
 5. Guardrails: one SELECT/WITH statement, write/admin keywords rejected, DB opened read-only,
@@ -484,11 +487,11 @@ translate() only (ask() repairs the syntax error), and the evals call translate(
 went from **63/80 to 77/80 on the default database and 65/80 to 77/80 on the large one** (77 and 76 on the runs
 before the J24 alternative, 77 and 77 after it; one run each, so repeat before trusting). Fixed by the soft lint and the two glossary terms above: E13-E16, D16,
 D18, J19-J21, J24 (opened_at/resolved_at window accepted as an alternative, as for J13), K18-K21.
-Still failing: **J16** ("incidents per team per agent": returns both counts, not the ratio; a
-`per agent` glossary term made it worse, see above), **D19** ("between 9am and 5pm" is applied to
-the as-of day only) and **J23** ("highest percentage of P1 incidents" is read as the team's share of
-all P1 incidents). Intermittent, each passing in other runs: J07 (counts every user, not only role
-agent), J01 (once invented the window `date('2026-08-28')`), J15.
+Then **J16, D19 and J23 were fixed** with three more soft checks (see the Agent section): live
+**80/80 on the default database and 79/80 on the large one** (the miss was J17, which passes 4 of 4
+when re-run alone: its first draft adds an open filter and the lint repairs it). Intermittent, each
+passing in other runs: J07 (counts every user, not only role agent), J01 (once invented the window
+`date('2026-08-28')`), J15, J17. J23 is settled as the team's own proportion of P1 incidents.
 
 ## Open items / next steps
 

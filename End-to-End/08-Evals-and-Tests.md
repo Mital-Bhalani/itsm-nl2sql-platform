@@ -72,8 +72,9 @@ glossary terms (category, email address, weather, a person's name).
 
 Fixes for those cases (soft lint checks, an `EXPLAIN` syntax check and the glossary terms `median` and
 `running total`, see chapter 5) took the live score from 63/80 to 77/80 on the default database and
-from 65/80 to 77/80 on the large one. Still failing: J16, D19 and J23; J07, J01 and J15 fail now and
-then.
+from 65/80 to 77/80 on the large one. Three more soft checks then fixed J16 ("per agent" ratio), D19
+(time of day) and J23 (per-team percentage): 80/80 on the default database and 79/80 on the large one.
+J07, J01, J15 and J17 fail now and then.
 
 Every run started from the Evals page is now stored (`logs/state.sqlite`) and the page shows
 recent runs and the questions that did not pass every time, so flakiness is visible without
