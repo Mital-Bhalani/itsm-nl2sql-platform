@@ -230,8 +230,8 @@ model. Details in [api/README.md](api/README.md#safety); every known attack is a
 
 ## Tech stack
 
-Python · SQLite (date expressions go through `db/dialect.py`, with a PostgreSQL variant and
-`db/schema.postgres.sql` ready but not yet run against a server) · OpenAI or Anthropic API at runtime ·
+Python · SQLite (date expressions go through `db/dialect.py`, with a PostgreSQL variant
+not yet run against a server) · OpenAI or Anthropic API at runtime ·
 FastAPI + Uvicorn · React + TypeScript (Vite, Tailwind CSS,
 TanStack Query, Recharts) · pytest. The per-day breakdown is in [Status](#status).
 `db/` and `semantics/` use the standard library only. `httpx` is pinned to 0.27.2 because the
@@ -296,11 +296,23 @@ own read-only query here.
 
 ![Data check page](docs/images/data-check.png)
 
-**Evals** (not pictured): scores the AI on a set of test questions whose correct answers are
+**Evals**: scores the AI on a set of test questions whose correct answers are
 known, so any drop in accuracy is caught straight away.
+
+![Evals page](docs/images/evals.png)
 
 **Light and dark**: the switch in the top-right corner of every page flips the whole app; the
 choice is remembered, and the first visit follows your operating system setting. The layout also
 adapts to tablets and phones (the sidebar becomes a menu).
 
+Every page has a dark version. Files in `docs/images/` use the page name plus `-dark`, for
+example `dashboard-dark.png`.
+
 ![Home page in dark mode](docs/images/home-dark.png)
+![Ask page in dark mode](docs/images/ask-dark.png)
+![Dashboard page in dark mode](docs/images/dashboard-dark.png)
+![Explorer page in dark mode](docs/images/explorer-dark.png)
+![Incident page in dark mode](docs/images/incident-dark.png)
+![Catalog page in dark mode](docs/images/catalog-dark.png)
+![Evals page in dark mode](docs/images/evals-dark.png)
+![Data check page in dark mode](docs/images/data-check-dark.png)

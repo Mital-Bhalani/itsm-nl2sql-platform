@@ -13,7 +13,7 @@ text is correct for the engine it was built for. The SQLite output is the histor
 wording, byte for byte; the PostgreSQL output is written from the documentation and has
 NOT been run against a live PostgreSQL yet (no server available here). Still SQLite-only:
 the read-only connection and authorizer in agent/nl2sql.py and the STRICT schema in
-db/schema.sql (see db/schema.postgres.sql for the PostgreSQL version of the tables).
+db/schema.sql.
 
 Standard library only.
 """

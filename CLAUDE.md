@@ -60,13 +60,15 @@ database, prints row counts and reports pass/fail.
 
 **Git:** branch `main`, first commit 2026-09-29 (history before that lives only in this file).
 Remote `origin` = **https://github.com/Mital-Bhalani/itsm-nl2sql-platform** (**public**;
-recreated 2026-09-29 with a cleaned history so no employer name appears in any commit). Claude
-commits and pushes directly (`git push`) using the user's VS Code GitHub login via git's
-credential helper; that login can create and push but not delete repos, and the GitHub CLI
-(`gh`) is not installed. Commit author: `Mital-Bhalani <meetbhalani666@gmail.com>`
-(repo-local git config only). Because the repo is public, scan staged changes for secrets and
-employer/client names before every push. Never commit `.env` (API key) or `db/*.sqlite`;
-both are gitignored.
+recreated 2026-09-29 with a cleaned history so no employer name appears in any commit). On
+2026-09-30 the local `.git` was found empty (no commits, no remote); `origin` was re-added,
+fetched, and local `main` was reset (`--soft`) onto `origin/main` so history is shared again.
+Commit and push only when the user asks; never force-push. The user's VS Code GitHub login (git
+credential helper) can create and push but not delete repos; the GitHub CLI (`gh`) is not
+installed. Commit author: `Mital-Bhalani <meetbhalani666@gmail.com>` (repo-local git config
+only, set again 2026-09-30). Because the repo is public, scan staged changes for secrets and
+employer/client names before every push. Never commit `.env` (API key) or `db/*.sqlite`; both
+are gitignored.
 
 **Safety posture the platform will enforce (aspirational on Day 1, built Day 2+):**
 read-only · **SELECT-only** · auto-LIMIT · **no raw PII in output** (`users.name` is PII).
@@ -84,7 +86,7 @@ read-only · **SELECT-only** · auto-LIMIT · **no raw PII in output** (`users.n
 
 | folder | day | status |
 |---|---|---|
-| `db/` | 1 | **done**: `schema.sql`, `seed.py`, generated `tickets.sqlite` (gitignored `*.sqlite`); `dialect.py` (SQLite/PostgreSQL date expressions), `schema.postgres.sql` (untested) |
+| `db/` | 1 | **done**: `schema.sql`, `seed.py`, generated `tickets.sqlite` (gitignored `*.sqlite`); `dialect.py` (SQLite/PostgreSQL date expressions) |
 | `agent/` | 1 → 2–3 | `naive_spike.py`, **`nl2sql.py`** (agent: `translate`, `ask`), **`llm.py`** (providers) |
 | `semantics/` | 2 | **done**: `build_catalog.py` fills all five meta_* tables |
 | `evals/` | 2 | **done**: `golden_set.yaml` (51 questions) + `run_evals.py` + `make_golden_set.py` |
@@ -406,7 +408,7 @@ self-test 51/51 both sets):
   (the golden sets still assume the sample date).
 - **Dialect layer** `db/dialect.py` (stdlib): `minutes_between`, `date_from`, `month` for
   SQLite and PostgreSQL; `build_catalog.py`, `services.py` and the prompt's dialect line use
-  it. SQLite catalog text verified byte-identical before/after. `db/schema.postgres.sql` added.
+  it. SQLite catalog text verified byte-identical before/after.
   PostgreSQL output is **not** run against a server yet; the read-only connection, authorizer
   and limits are still SQLite-only.
 - **CI**: `.github/workflows/ci.yml`: Python job (pip check, seed + catalog for both sizes,

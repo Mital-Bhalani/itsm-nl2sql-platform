@@ -88,8 +88,7 @@ and the same pattern for 2 (High), 3 (Medium) and 4 (Low).
   running `build_catalog.py` and every relative time term, the agent's "today" and the API's
   as-of follow (they read it back from `meta_settings`).
 - **Dialect**: `db/dialect.py` holds the three date expressions the project needs
-  (`minutes_between`, `date_from`, `month`) for SQLite and PostgreSQL. `db/schema.postgres.sql`
-  is the PostgreSQL version of the tables. `DB_DIALECT=postgres` switches the generated text; the
+  (`minutes_between`, `date_from`, `month`) for SQLite and PostgreSQL. `DB_DIALECT=postgres` switches the generated text; the
   read-only connection and authorizer are still SQLite-only, and the PostgreSQL output has not
   yet been run against a live server.
 - **Realistic shape**: incidents opened more in business hours, priorities weighted 5/15/50/30,
