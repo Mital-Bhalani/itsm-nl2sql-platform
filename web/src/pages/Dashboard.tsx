@@ -114,8 +114,8 @@ export default function DashboardPage() {
         priority's SLA target (wall-clock).
       </p>
 
-      <div className="grid grid-cols-1 gap-5 xl:grid-cols-5">
-        <Card className="xl:col-span-3">
+      <div className="grid grid-cols-1 gap-5 xl:grid-cols-2">
+        <Card>
           <CardTitle
             hint={
               <span className="flex gap-1">
@@ -152,7 +152,7 @@ export default function DashboardPage() {
           <p className="text-xs text-slate-500">Click a bar to open that team's incidents. Count and rate can rank teams differently.</p>
         </Card>
 
-        <Card className="xl:col-span-2">
+        <Card className="overflow-x-auto">
           <CardTitle>Team scorecard</CardTitle>
           <table className="w-full text-sm [&_td]:px-2 [&_th]:px-2 [&_th]:whitespace-nowrap">
             <thead className="text-left text-xs uppercase tracking-wide text-slate-500">
@@ -160,7 +160,7 @@ export default function DashboardPage() {
                 <th className="py-1.5">Team</th>
                 <th>Open</th>
                 <th>Breaches</th>
-                <th className="w-32">Breach %</th>
+                <th>Breach %</th>
                 <th>MTTR h</th>
               </tr>
             </thead>

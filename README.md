@@ -1,11 +1,58 @@
 # ITSM NL2SQL Platform
 
-NL2SQL platform over ITSM ticket data: plain-English questions → safe, read-only SQL with a
-semantic layer.
+**Ask your IT service data a question in plain English and get a checked answer back.**
 
-A service manager asks a question such as *"which assignment groups breached SLA most last
-month?"*. The platform writes the SQL, runs it **read-only**, and answers in plain English —
-**with the SQL shown**, so the answer can be trusted and checked.
+A service manager types *"Which teams missed their SLA most last month?"*. The app finds the
+answer in the ticket database and replies in a sentence, with a chart. It also shows exactly how
+it got the number, so nobody has to take it on trust.
+
+## In plain words
+
+- **No SQL, no spreadsheets.** You ask in normal English; the app does the database work.
+- **It shows its working.** Every answer comes with the database query behind it.
+- **It cannot change anything.** The app can only read the data, never edit or delete it.
+- **It protects people's data.** Staff names are hidden and cannot be pulled out by a question.
+- **It says "I can't answer that"** when the data does not hold the answer, instead of guessing.
+
+## How a question gets answered
+
+```mermaid
+flowchart LR
+    Q["You ask a question<br/>in plain English"] --> D["Dictionary<br/>what our words mean<br/>e.g. P1 = priority 1"]
+    D --> AI["AI model<br/>writes the database query"]
+    AI --> G{"Safety check<br/>read-only? allowed?"}
+    G -- "no" --> R["Refused, with the reason"]
+    G -- "yes" --> DB[("Ticket database")]
+    DB --> A["Answer in a sentence<br/>+ chart + the query used"]
+```
+
+The **dictionary** is the key idea. On its own, an AI model guesses what "breached SLA" or "P1"
+means and often gets it wrong. The dictionary tells it the company's exact definitions, so the
+same question always gets the same, correct answer.
+
+## What you can see
+
+| | |
+|---|---|
+| **Dashboard**: the health of the service at a glance: open tickets, SLA breaches, fix times, trends by team and month.<br/><br/>![Dashboard](docs/images/dashboard.png) | **Ask**: type a question, get a sentence, a chart and suggested next questions.<br/><br/>![Ask](docs/images/ask.png) |
+| **Explorer**: browse, filter and download every table in the database.<br/><br/>![Explorer](docs/images/explorer.png) | **Incident**: one ticket in detail: how much of its SLA it used, its timeline and similar past tickets.<br/><br/>![Incident](docs/images/incident.png) |
+| **Catalog**: the dictionary itself: every business term and what it means in the data.<br/><br/>![Catalog](docs/images/catalog.png) | **Data check**: proof that every number on screen matches the database (25 of 25 checks pass).<br/><br/>![Data check](docs/images/data-check.png) |
+| **Home**: start page with the service status and links to everything.<br/><br/>![Home](docs/images/home.png) | **Evals** (not pictured): scores the AI on 15 test questions with known answers. |
+
+## How it fits together
+
+```mermaid
+flowchart TB
+    U["People<br/>(web browser)"] --> W["Screens<br/>React app or Streamlit app"]
+    W --> API["Service layer (API)<br/>login key · rate limit · audit log"]
+    API --> AG["Question answerer<br/>dictionary + safety checks"]
+    AG --> LLM["AI model<br/>OpenAI or Anthropic Claude"]
+    AG --> DB[("Ticket database<br/>read-only")]
+    API --> DB
+```
+
+The screens never touch the database directly; everything goes through the service layer,
+which logs every question asked. Either AI provider can be used and swapped per question.
 
 ## Status
 
@@ -129,6 +176,7 @@ python evals/run_evals.py --self-test    # expects 15/15, no API key needed
 ├── api/                      # FastAPI service (see api/README.md)
 ├── ui/                       # Streamlit front end (see ui/README.md)
 ├── web/                      # React + TypeScript front end (see web/README.md)
+├── docs/images/              # screenshots used in this README
 ├── tests/                    # pytest: guardrails, providers, API end to end (fake model)
 ├── run_app.py                # starts the API and the UI together
 ├── CLAUDE.md                 # detailed project memory and handoff notes
@@ -191,16 +239,16 @@ pinned `openai` 1.51.2 breaks on newer versions.
 
 ## How this project was built
 
-The whole platform was written by directing **Claude Code**, an AI coding assistant, one day
-at a time. Claude Code is the build tool only. At runtime the app calls OpenAI or Anthropic to
-turn questions into SQL.
+The whole platform was built with **Claude Code**, an AI coding assistant, in eight steps (see
+[Status](#status)). The method was simple and repeated every day:
 
-- **Start from the failure.** Day 1 sends a bare question to a model with no context. It
-  invents tables, uses the wrong SQL dialect and guesses what "breach" means. That list of
-  mistakes became the plan.
-- **Fix with context, not code.** The semantic catalog tells the model what the data means.
-  When an answer was wrong, the usual fix was a clearer catalog entry, not a code change.
-- **Measure every change.** The golden set scores the agent after each fix, so an improvement
-  in one place cannot quietly break another.
-- **Check what users see.** The Data check page recomputes every number the UI shows directly
-  from the database.
+```mermaid
+flowchart LR
+    T["Try it"] --> F["Find what goes wrong"] --> X["Fix the cause"] --> M["Re-test everything"] --> T
+```
+
+Day 1 asked the AI a question with no help. It invented table names and guessed definitions.
+Each later day fixed one of those problems (the dictionary, the safety checks, the test
+questions) and then added the screens people use. Wrong answers were usually fixed by making
+the dictionary clearer, not by writing more code, and every fix was re-tested against all the
+test questions so it could not quietly break something else.
