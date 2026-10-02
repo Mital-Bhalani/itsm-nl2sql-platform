@@ -132,6 +132,19 @@ export type Incident = {
   opened_at: string
   resolved_at: string | null
   reopened_count: number
+  impact: 1 | 2 | 3
+  assignee_id: number | null
+  assignee_role: string | null
+  caller_id: number | null
+  caller_role: string | null
+  responded_at: string | null
+  response_minutes: number | null
+  response_target_minutes: number
+  response_breached: boolean | null
+  escalated_at: string | null
+  downtime_minutes: number | null
+  caused_by_change_id: number | null
+  caused_by_change: { id: number; description: string; risk: string; status: string; planned_start: string } | null
   target_minutes: number
   resolution_minutes: number | null
   sla_breached: boolean | null

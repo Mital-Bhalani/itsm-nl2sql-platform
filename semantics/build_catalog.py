@@ -24,14 +24,17 @@ read from db/schema.sql; descriptions, example values and synonyms are drafted b
 hand below. Columns whose meaning is not settled by the schema are flagged with
 is_ambiguous = 1 and a note, rather than guessed.
 
-meta_metrics: mttr, sla_breach_rate and reopen_rate, each stored as reusable SQL
-fragments (expression, joins, filters) so the agent looks them up instead of
-writing the formula itself.
+meta_metrics: mttr, sla_breach_rate, reopen_rate, mean_response_time, response_breach_rate,
+escalation_rate and total_downtime, each stored as reusable SQL fragments (expression,
+joins, filters) so the agent looks them up instead of writing the formula itself.
 
 meta_glossary: the semantic layer. Maps the words service managers use ("P1",
 "team", "missed SLA", "last month") to an entity, a value condition, a metric or
-a time window. Terms the data cannot answer ("assignee", "response time") are
-kept with is_answerable = 0 so the agent can say so instead of guessing.
+a time window. Terms the data cannot answer ("category", "email address") are
+kept with is_answerable = 0 so the agent can say so instead of guessing. The ten
+terms that were unanswerable until 2026-10-02 (assignee, caller, response time,
+downtime, impact, actual change window, change-caused incident, escalation,
+forecast, agent activity) are answerable since the schema gained their columns.
 
 Relative time terms are anchored to AS_OF, the fixed "today" of the sample data
 (NOW in db/seed.py).
@@ -164,13 +167,15 @@ COLUMN_DRAFTS = {
     ("assignment_groups", "id"): (
         "Identifier of the support team.", "2", 0, None),
     ("assignment_groups", "name"): (
-        "Name of the support team, unique across teams.", "Network", 0, None),
+        "Name of the support team, unique across teams. Not personal data: label every "
+        "per-team result with g.name, never with the team id alone.", "Network", 0, None),
 
     # users
     ("users", "id"): (
         "Identifier of the person.", "7", 0, None),
     ("users", "name"): (
-        "Full name of the person. Personal data: do not show in answers unless needed.",
+        "Full name of the person. Personal data: never select it; identify a person by "
+        "users.id and users.role instead.",
         "Maya Rossi", 1, None),
     ("users", "role"): (
         "Job role: agent works tickets, team_lead leads a team, manager oversees "
@@ -186,12 +191,16 @@ COLUMN_DRAFTS = {
         "Incident priority this target applies to, 1 (highest) to 4 (lowest). "
         f"Users say: {PRIORITY_SAYINGS}.", "1", 0, None),
     ("sla_targets", "target_minutes"): (
-        "Maximum time allowed to resolve an incident of this priority, in wall-clock "
-        "minutes from opened_at to resolved_at.", "240", 0,
-        "Not stated whether this is a resolution or a first-response target (the breach "
-        "rule in schema.sql treats it as resolution), nor whether time on hold or outside "
-        "business hours should count. Targets have no effective dates, so a change "
-        "rewrites history."),
+        "Maximum time allowed to RESOLVE an incident of this priority, in wall-clock "
+        "minutes from opened_at to resolved_at (the first-response target is "
+        "response_minutes).", "240", 0,
+        "Not stated whether time on hold or outside business hours should count. Targets "
+        "have no effective dates, so a change rewrites history."),
+    ("sla_targets", "response_minutes"): (
+        "Maximum time allowed for the FIRST RESPONSE to an incident of this priority, in "
+        "wall-clock minutes from opened_at to responded_at (1 = 30, 2 = 60, 3 = 240, "
+        "4 = 480). Compare with the response time, never with the resolution time.",
+        "30", 0, None),
 
     # incidents
     ("incidents", "id"): (
@@ -225,6 +234,35 @@ COLUMN_DRAFTS = {
         "depend on which one is meant."),
     ("incidents", "reopened_count"): (
         "How many times the incident was reopened after being resolved.", "0", 0, None),
+    ("incidents", "impact"): (
+        "How widely the incident was felt: 1 = High (whole site or many users), 2 = Medium "
+        "(a department or team), 3 = Low (one user). Separate from priority; 'high impact' "
+        "means impact = 1, not priority 2.", "2", 0, None),
+    ("incidents", "assignee_id"): (
+        "The person working the incident (an agent or team lead of the owning team). Empty "
+        "while the status is New. Count per person with GROUP BY i.assignee_id; join users "
+        "only for the role, and never select users.name.", "17", 0, None),
+    ("incidents", "caller_id"): (
+        "The person who raised the incident. Empty when monitoring raised it automatically. "
+        "Join users u ON u.id = i.caller_id for the caller's role; never select users.name.",
+        "33", 0, None),
+    ("incidents", "responded_at"): (
+        "When someone first responded to the incident, UTC, text 'YYYY-MM-DD HH:MM:SS'. "
+        "Set together with assignee_id (empty while New). Response time = minutes from "
+        "opened_at to responded_at; compare with sla_targets.response_minutes.",
+        "2026-08-14 09:52:00", 0, None),
+    ("incidents", "escalated_at"): (
+        "When the incident was escalated, UTC, text 'YYYY-MM-DD HH:MM:SS'. Empty when it was "
+        "never escalated, so 'escalated' means escalated_at IS NOT NULL.",
+        "2026-08-14 12:10:00", 0, None),
+    ("incidents", "downtime_minutes"): (
+        "Minutes the affected service was unavailable. 0 = no outage. Empty while the incident "
+        "is still open (not yet known), so SUM and AVG skip open incidents automatically.",
+        "95", 0, None),
+    ("incidents", "caused_by_change_id"): (
+        "The change that caused this incident, when one is known (usually the owning team's "
+        "most recent change). Empty for most incidents. 'Caused by a change' = "
+        "caused_by_change_id IS NOT NULL.", "78", 0, None),
 
     # changes
     ("changes", "id"): (
@@ -245,6 +283,13 @@ COLUMN_DRAFTS = {
     ("changes", "planned_end"): (
         "Booked end of the change window, UTC, text 'YYYY-MM-DD HH:MM:SS'. Planned, "
         "not actual.", "2026-10-04 01:00:00", 0, None),
+    ("changes", "actual_start"): (
+        "When the work really started, UTC, text 'YYYY-MM-DD HH:MM:SS'. Empty until the change "
+        "starts (Draft, Assess, Scheduled, Cancelled).", "2026-09-12 21:05:00", 0, None),
+    ("changes", "actual_end"): (
+        "When the work really finished, UTC, text 'YYYY-MM-DD HH:MM:SS'. Empty while it is "
+        "still running (Implement) or has not started. actual_end > planned_end = the change "
+        "overran its window.", "2026-09-13 00:20:00", 0, None),
 }
 
 UNDRAFTED_NOTE = "No drafted description yet: column is new in schema.sql and needs review."
@@ -258,6 +303,8 @@ COLUMN_SYNONYMS = {
     ("users", "role"): "job role, position",
     ("users", "assignment_group_id"): "user's team, member of",
     ("sla_targets", "target_minutes"): "SLA target, SLA deadline, resolution target, SLA time",
+    ("sla_targets", "response_minutes"): "response target, response SLA, response deadline, "
+                                         "acknowledgement target",
     ("incidents", "id"): "incident number, ticket number, ticket id",
     ("incidents", "short_desc"): "title, summary, subject, incident description",
     ("incidents", "priority"): "urgency, P-level, incident priority, severity, sev, "
@@ -267,6 +314,14 @@ COLUMN_SYNONYMS = {
     ("incidents", "opened_at"): "created, raised, logged, reported, open date, created date",
     ("incidents", "resolved_at"): "fixed date, resolution date, resolved date",
     ("incidents", "reopened_count"): "reopens, number of reopens, times reopened",
+    ("incidents", "impact"): "impact level, impact rating",
+    ("incidents", "assignee_id"): "assignee id, assigned user, assigned agent id",
+    ("incidents", "caller_id"): "caller id, requester id, reporter",
+    ("incidents", "responded_at"): "first response time, responded date, acknowledged at, "
+                                   "response date",
+    ("incidents", "escalated_at"): "escalation date, escalated date, escalation time",
+    ("incidents", "downtime_minutes"): "downtime minutes, outage minutes, minutes down",
+    ("incidents", "caused_by_change_id"): "causing change, related change, change that caused it",
     ("changes", "id"): "change number, CR number, RFC number",
     ("changes", "description"): "change summary, change title, what is being changed",
     ("changes", "risk"): "risk level, change risk",
@@ -274,6 +329,8 @@ COLUMN_SYNONYMS = {
     ("changes", "assignment_group_id"): "implementing team, change owner team",
     ("changes", "planned_start"): "scheduled start, window start, implementation date, start date",
     ("changes", "planned_end"): "scheduled end, window end, end date",
+    ("changes", "actual_start"): "real start, started at, actually started",
+    ("changes", "actual_end"): "real end, finished at, actually finished, completed at",
 }
 
 # -----------------------------------------------------------------------------
@@ -334,6 +391,13 @@ def quarter_start(offset=0):
     return date(index // 4, index % 4 * 3 + 1, 1).isoformat()
 
 
+def months_back(n):
+    """First day of the calendar month `n` months before AS_OF's month (ISO date)."""
+    today = date.fromisoformat(AS_OF)
+    index = today.year * 12 + today.month - 1 - n
+    return date(index // 12, index % 12 + 1, 1).isoformat()
+
+
 def term(term, kind, synonyms, definition, sql_hint=None, metric_name=None,
          related_columns=None, answerable=True, ambiguity=None):
     return {
@@ -356,12 +420,15 @@ GLOSSARY = [
          "A support team. Incidents and changes join to it on assignment_group_id.",
          "assignment_groups g", related_columns="assignment_groups.name"),
     term("user", "entity", "person, staff, engineer, technician, analyst, employee",
-         "A person in the IT organisation. Names are personal data.",
+         "A person in the IT organisation. Names are personal data: identify a person by u.id "
+         "and u.role. Incidents point at users twice: i.assignee_id (who works it) and "
+         "i.caller_id (who raised it); join on the one the question is about, never through "
+         "the team.",
          "users u", related_columns="users.name, users.role"),
     term("SLA target", "entity", "SLA, SLA deadline, resolution target",
-         "The time allowed to resolve an incident, per priority. "
-         "Join: sla_targets s ON s.priority = i.priority.",
-         "sla_targets s", related_columns="sla_targets.target_minutes"),
+         "The time allowed per priority: target_minutes to resolve, response_minutes for the "
+         "first response. Join: sla_targets s ON s.priority = i.priority.",
+         "sla_targets s", related_columns="sla_targets.target_minutes, sla_targets.response_minutes"),
 
     # --- incident priority ---------------------------------------------------
     *[term(f"{label.lower()} priority", "value", sayings,
@@ -398,6 +465,46 @@ GLOSSARY = [
     term("reopened incident", "value", "reopened, bounced back, came back, re-opened",
          "An incident reopened at least once after being resolved.",
          "i.reopened_count > 0", related_columns="incidents.reopened_count"),
+    term("unassigned incident", "value", "unassigned, not assigned, nobody assigned, "
+                                         "waiting for assignment, no assignee",
+         "An incident nobody has picked up yet (assignee_id empty; always the case while New).",
+         "i.assignee_id IS NULL", related_columns="incidents.assignee_id"),
+    term("escalation", "value", "escalated, escalate, escalations, escalated incident, "
+                                "escalated ticket",
+         "An incident that was escalated: escalated_at is set. 'When' = i.escalated_at. "
+         "Rate: metric escalation_rate.",
+         "i.escalated_at IS NOT NULL", related_columns="incidents.escalated_at"),
+    term("change-caused incident", "value", "caused by change, caused by a change, "
+                                            "change-related incident, change-induced, "
+                                            "incidents from changes, change caused",
+         "An incident linked to the change that caused it (caused_by_change_id set). A count "
+         "needs no join. For the change's description or risk, or 'which change caused the "
+         "most incidents', JOIN changes c ON c.id = i.caused_by_change_id and GROUP BY c.id.",
+         "i.caused_by_change_id IS NOT NULL",
+         related_columns="incidents.caused_by_change_id, changes.id"),
+    term("raised by monitoring", "value", "monitoring, automated alert, auto-generated, "
+                                          "system-generated, no caller, monitoring alert",
+         "An incident raised automatically rather than by a person: caller_id is empty.",
+         "i.caller_id IS NULL", related_columns="incidents.caller_id"),
+
+    # --- impact (1 High, 2 Medium, 3 Low), separate from priority ------------
+    term("impact", "value", "business impact, users affected, impact level, impact {n}",
+         "How widely an incident was felt: 1 = High (whole site or many users), 2 = Medium "
+         "(a department), 3 = Low (one user). A different column from priority: never map "
+         "impact words to i.priority.",
+         "i.impact = {n}", related_columns="incidents.impact"),
+    term("high impact", "value", "high-impact, high-impact incident, high impact incident, "
+                                 "major incident, site-wide, widespread, many users affected",
+         "Impact 1: the whole site or many users were affected.",
+         "i.impact = 1", related_columns="incidents.impact"),
+    term("medium impact", "value", "medium-impact, medium-impact incident, "
+                                   "medium impact incident, moderate impact, department-wide",
+         "Impact 2: a department or team was affected.",
+         "i.impact = 2", related_columns="incidents.impact"),
+    term("low impact", "value", "low-impact, low-impact incident, low impact incident, "
+                                "minor impact, single user, one user affected",
+         "Impact 3: a single user was affected.",
+         "i.impact = 3", related_columns="incidents.impact"),
     term("overdue", "value", "past due, aging, breaching now, over target",
          "An open incident that has already been open longer than its SLA target "
          f"as of {AS_OF}. Needs the sla_targets join. Not part of sla_breach_rate.",
@@ -429,6 +536,21 @@ GLOSSARY = [
     term("cancelled change", "value", "cancelled change, withdrawn change",
          "A change that was cancelled.",
          "c.status = 'Cancelled'", related_columns="changes.status"),
+    term("change overrun", "value", "overran, ran over, over-ran, overrun, overrunning, "
+                                    "exceeded its window, finished late, late finish",
+         "A finished change whose actual_end passed its planned_end. Overrun minutes = "
+         f"{DIALECT.minutes_between('c.actual_end', 'c.planned_end')}.",
+         "c.actual_end IS NOT NULL AND c.actual_end > c.planned_end",
+         related_columns="changes.actual_end, changes.planned_end"),
+    term("actual change window", "concept", "actual start, actual end, really ran, "
+                                            "actually started, actually finished, "
+                                            "actual duration",
+         "When a change really ran: c.actual_start and c.actual_end (empty until the change "
+         "starts; actual_end empty while it is still running). Actual duration = "
+         f"{DIALECT.minutes_between('c.actual_end', 'c.actual_start')}; compare with "
+         "planned_start/planned_end for lateness or overrun.",
+         "c.actual_start IS NOT NULL",
+         related_columns="changes.actual_start, changes.actual_end"),
 
     # --- user roles ----------------------------------------------------------
     term("agent", "value", "support agent, analyst role",
@@ -457,6 +579,34 @@ GLOSSARY = [
     term("reopen rate", "metric", "bounce rate, re-open rate, reopen percentage",
          "Share of incidents reopened at least once. Use metric reopen_rate.",
          metric_name="reopen_rate", related_columns="incidents.reopened_count"),
+    term("response time", "metric", "time to respond, first response, time to acknowledge, "
+                                    "acknowledgement time, mean time to respond, MTTA, "
+                                    "average response time, response times",
+         "Wall-clock minutes from opened_at to responded_at (the first response), over "
+         "incidents that have a responded_at. Use metric mean_response_time. Not the "
+         "resolution time (MTTR).",
+         metric_name="mean_response_time",
+         related_columns="incidents.opened_at, incidents.responded_at"),
+    term("response breach", "value", "late response, responded late, missed response target, "
+                                     "response SLA miss, response SLA breach, slow response, "
+                                     "missed the response target",
+         "An incident whose first response took longer than response_minutes for its priority. "
+         "Needs the sla_targets join. Rate: metric response_breach_rate. Different from an "
+         "SLA breach, which is about resolution.",
+         f"i.responded_at IS NOT NULL AND "
+         f"{DIALECT.minutes_between('i.responded_at', 'i.opened_at')} > s.response_minutes",
+         related_columns="incidents.responded_at, sla_targets.response_minutes"),
+    term("escalation rate", "metric", "escalation percentage, share escalated, "
+                                      "percentage escalated",
+         "Share of incidents that were escalated. Use metric escalation_rate.",
+         metric_name="escalation_rate", related_columns="incidents.escalated_at"),
+    term("downtime", "metric", "outage duration, service down time, outage minutes, "
+                               "outage time, unavailability, total downtime, time down",
+         "Minutes a service was unavailable, from i.downtime_minutes (0 = no outage; empty "
+         "while still open). Total: metric total_downtime (SUM). Average per incident: AVG of "
+         "the same column. 'Had an outage' = i.downtime_minutes > 0. Divide by 60 for hours. "
+         "Not the resolution time.",
+         metric_name="total_downtime", related_columns="incidents.downtime_minutes"),
     term("SLA compliance", "value", "SLA compliance rate, compliance rate, SLA attainment, "
                                     "SLA adherence, SLA success rate, SLA met rate",
          "A finished incident that met its SLA target: the opposite of an SLA breach. The "
@@ -512,49 +662,65 @@ GLOSSARY = [
          "with strftime('%Y-%m', i.opened_at)), then SUM(n) OVER (ORDER BY period) AS "
          "running_total in the outer query. The plain per-period counts are not a running total."),
 
-    # --- not answerable from this data ---------------------------------------
+    # --- people on an incident (answerable since 2026-10-02) -----------------
     # "assigned to" is deliberately NOT a synonym: "incidents assigned to Network" is a team
-    # question (answerable). Only wording about a person triggers the refusal.
+    # question. Only wording about a person resolves to these terms.
     term("assignee", "concept", "assigned person, assigned engineer, owner, who fixed, "
-                                "who resolved, who is working on, engineer on the ticket",
-         "The person working an incident. Not stored: incidents link to a team, not a "
-         "person. Answer at team level instead.", answerable=False),
-    term("caller", "concept", "requester, reported by, raised by, customer",
-         "The person who reported an incident. Not stored.", answerable=False),
-    term("response time", "concept", "time to respond, first response, time to acknowledge",
-         "Time until someone first responded. Not stored; only resolution time exists.",
-         answerable=False),
-    term("downtime", "concept", "outage duration, service down time",
-         "How long a service was unavailable. Not stored; resolution time is not downtime.",
-         answerable=False),
-    term("impact", "concept", "business impact, users affected",
-         "How many users or how much business an incident affected. Not stored.",
-         answerable=False,
-         ambiguity="Sometimes used as a synonym for priority. Do not map it to priority "
-                   "without confirmation."),
-    term("actual change window", "concept", "actual start, actual end, overran, ran over, "
-                                            "change overrun",
-         "When a change really ran. Only planned_start and planned_end are stored.",
-         answerable=False),
-    term("change-caused incident", "concept", "caused by change, change-related incident",
-         "An incident caused by a change. Incidents and changes are not linked.",
-         answerable=False),
-    term("escalation", "concept", "escalated, escalate, escalations, escalated incident, "
-                                  "escalation level",
-         "Whether or when an incident was escalated. Not stored: there is no escalation "
-         "column or status.", answerable=False),
-    term("forecast", "concept", "predict, prediction, predicted, forecasting, projection, "
-                                "projected",
-         "A prediction of future ticket volume. The data holds past incidents and planned "
-         "changes only; the platform does not forecast.", answerable=False),
+                                "who resolved, who is working on, engineer on the ticket, "
+                                "who is assigned, assigned agent",
+         "The person working an incident: i.assignee_id -> users.id (an agent or team lead of "
+         "the owning team; empty while New). Report u.id and u.role (JOIN users u ON u.id = "
+         "i.assignee_id), never u.name. 'Who is the assignee of incident N' = SELECT "
+         "i.assignee_id, u.role ... WHERE i.id = N.",
+         "i.assignee_id IS NOT NULL", related_columns="incidents.assignee_id, users.role"),
     term("agent activity", "concept", "agent resolved, agent handled, agent closed, "
                                       "resolved by each agent, resolved by agent, "
                                       "resolved by an agent, handled by each agent, "
                                       "handled by agent, agent performance, top agent, "
-                                      "best agent",
-         "What an individual agent resolved or handled. Not stored: incidents link to a team, "
-         "not to a person, and joining them through the team would only multiply rows. "
-         "Answer at team level instead.", answerable=False),
+                                      "best agent, per assignee, by assignee, each assignee",
+         "What an individual person resolved or handled: GROUP BY i.assignee_id over "
+         "incidents (status filters as asked, e.g. resolved = Resolved or Closed). 'Top' or "
+         "'best agent' = ORDER BY COUNT(*) DESC LIMIT 1. Join users only for the role "
+         "(JOIN users u ON u.id = i.assignee_id); never join users through the team and never "
+         "select u.name.",
+         "i.assignee_id IS NOT NULL", related_columns="incidents.assignee_id, users.role"),
+    term("caller", "concept", "requester, reported by, raised by, customer, who raised, "
+                              "who reported, callers, requesters",
+         "The person who raised an incident: i.caller_id -> users.id, empty when monitoring "
+         "raised it. Count per caller with GROUP BY i.caller_id; for the caller's role JOIN "
+         "users u ON u.id = i.caller_id (LEFT JOIN to keep monitoring-raised incidents in a "
+         "total). Never select u.name.",
+         "i.caller_id IS NOT NULL", related_columns="incidents.caller_id, users.role"),
+
+    # --- forecast: a simple projection, clearly labelled -----------------------
+    term("forecast", "concept", "predict, prediction, predicted, forecasting, projection, "
+                                "projected, expected volume, expect next month",
+         "A projection of future ticket volume, used ONLY when the question asks to predict or "
+         "forecast. This platform has no forecasting model: the agreed projection is the "
+         f"AVERAGE monthly count over the three full calendar months before the as-of date "
+         f"({months_back(3)} to {months_back(0)}, exclusive), i.e. SELECT AVG(n) FROM (SELECT "
+         "COUNT(*) AS n FROM incidents i WHERE <hint window> GROUP BY strftime('%Y-%m', "
+         "i.opened_at)). Label the result as a projection from the recent average. A plain "
+         "'average per month' question is not a forecast: it averages over every month that has "
+         "data, with no window.",
+         window((months_back(3),), (months_back(0),)),
+         related_columns="incidents.opened_at"),
+
+    # --- not answerable from this data ---------------------------------------
+    term("category", "concept", "categories, subcategory, incident category, categorisation, "
+                                "categorization, configuration item, CI, affected service, "
+                                "service affected",
+         "What kind of thing broke (category, CI or service). Not stored: only the free-text "
+         "short_desc exists. Offer a breakdown by team or description instead.",
+         answerable=False),
+    term("email address", "concept", "email, e-mail, phone number, contact details, "
+                                     "contact number",
+         "Contact details of a person. Not stored, and personal data: the platform returns "
+         "only user ids and roles.", answerable=False),
+    term("customer satisfaction", "concept", "CSAT, satisfaction score, satisfaction, survey, "
+                                             "NPS, feedback score, happiness",
+         "How satisfied users were with the fix. Not stored: there are no survey results.",
+         answerable=False),
 ]
 # -----------------------------------------------------------------------------
 #  Table descriptions: table -> (description, grain)
@@ -565,23 +731,30 @@ TABLE_DRAFTS = {
         "Application Support, Infrastructure). Join here to report anything 'by team'.",
         "one row per team"),
     "users": (
-        "People in the IT organisation with their role and team. Names are personal data: "
-        "never return users.name in answers. Incidents do not link to users.",
+        "People in the IT organisation with their role and team. Only users.name is personal "
+        "data: never return it and identify a person by users.id and users.role (team names "
+        "from assignment_groups.name are fine). Incidents point here twice: "
+        "incidents.assignee_id (who works it) and incidents.caller_id (who raised it).",
         "one row per person"),
     "sla_targets": (
-        "Resolution deadline in minutes for each incident priority (1 = Critical 240, "
-        "2 = High 480, 3 = Medium 2880, 4 = Low 7200).",
+        "Deadlines in minutes for each incident priority: target_minutes to resolve "
+        "(1 = Critical 240, 2 = High 480, 3 = Medium 2880, 4 = Low 7200) and "
+        "response_minutes for the first response (30, 60, 240, 480).",
         "one row per priority"),
     "incidents": (
-        "Unplanned interruptions: what broke, its priority, status, owning team, when it was "
-        "opened and resolved, and how often it was reopened. SLA breach is derived by joining "
-        "sla_targets, not stored. Totals and breakdowns by priority, status or date read this "
-        "table alone (FROM incidents i, no other join); join assignment_groups only when the "
-        "answer is per team or names a team.",
+        "Unplanned interruptions: what broke, its priority and impact, status, owning team, "
+        "who works it (assignee_id) and who raised it (caller_id), when it was opened, first "
+        "responded to, escalated and resolved, how often it was reopened, its downtime once "
+        "finished, and the change that caused it if known. SLA breach is derived by joining "
+        "sla_targets, not stored. Totals and breakdowns by priority, impact, status, person "
+        "or date read this table alone (FROM incidents i, no other join); join "
+        "assignment_groups only when the answer is per team or names a team.",
         "one row per incident"),
     "changes": (
-        "Planned work on IT systems with risk level, status, owning team and a booked "
-        "(planned, not actual) time window. Not linked to incidents.",
+        "Planned work on IT systems with risk level, status, owning team, a booked window "
+        "(planned_start/planned_end) and, once started, the actual window "
+        "(actual_start/actual_end). Linked from incidents through "
+        "incidents.caused_by_change_id.",
         "one row per change request"),
 }
 
@@ -605,7 +778,21 @@ JOINS = [
     ("users", "assignment_group_id", "assignment_groups", "id", "many-to-one",
      "Team membership; NULL for managers and admins (use LEFT JOIN to keep them). Never join "
      "users to incidents through the team: it multiplies every incident by the team's head "
-     "count and inflates counts."),
+     "count and inflates counts. Incidents reach their people through assignee_id and "
+     "caller_id instead."),
+    ("incidents", "assignee_id", "users", "id", "many-to-one",
+     "The person working the incident; NULL while New. Per-person counts need no join "
+     "(GROUP BY i.assignee_id). Join only for the role: JOIN users u ON u.id = i.assignee_id. "
+     "Never select u.name."),
+    ("incidents", "caller_id", "users", "id", "many-to-one",
+     "The person who raised the incident; NULL when monitoring raised it. JOIN users u ON "
+     "u.id = i.caller_id for the caller's role (LEFT JOIN keeps monitoring-raised incidents). "
+     "Never select u.name."),
+    ("incidents", "caused_by_change_id", "changes", "id", "many-to-one",
+     "The change that caused the incident; NULL for most incidents. A count of change-caused "
+     "incidents needs no join (i.caused_by_change_id IS NOT NULL). JOIN changes c ON c.id = "
+     "i.caused_by_change_id for the change's description or risk, or to rank changes by the "
+     "incidents they caused (GROUP BY c.id)."),
 ]
 
 
@@ -630,7 +817,9 @@ GLOSSARY_FIELDS = ["term", "kind", "synonyms", "definition", "sql_hint", "metric
 #  Metric definitions (reusable SQL fragments, base alias i = incidents)
 # -----------------------------------------------------------------------------
 RESOLUTION_MINUTES = DIALECT.minutes_between("i.resolved_at", "i.opened_at")
+RESPONSE_MINUTES = DIALECT.minutes_between("i.responded_at", "i.opened_at")
 FINISHED = "i.status IN ('Resolved', 'Closed')"
+RESPONDED = "i.responded_at IS NOT NULL"
 
 METRICS = [
     {
@@ -681,6 +870,67 @@ METRICS = [
                  "ROUND(100.0 * <sql_expression>, 1) as a percentage. 'How many reopened' "
                  "questions: report the count SUM(CASE WHEN i.reopened_count > 0 THEN 1 ELSE 0 "
                  "END), never multiplied by 100.",
+    },
+    {
+        "metric_name": "mean_response_time",
+        "description": "Mean time to respond: average wall-clock minutes from opened_at to "
+                       "responded_at (the first response) over incidents that have one.",
+        "unit": "minutes",
+        "base_table": "incidents",
+        "base_alias": "i",
+        "sql_expression": f"AVG({RESPONSE_MINUTES})",
+        "required_joins": None,
+        "filters": RESPONDED,
+        "time_column": "i.opened_at",
+        "notes": "Incidents still New have no response yet and are left out. Not the "
+                 "resolution time (mttr). Divide by 60 for hours.",
+    },
+    {
+        "metric_name": "response_breach_rate",
+        "description": "Share of responded incidents whose first response took longer than "
+                       "the response_minutes for their priority.",
+        "unit": "ratio (0-1)",
+        "base_table": "incidents",
+        "base_alias": "i",
+        "sql_expression": f"AVG(CASE WHEN {RESPONSE_MINUTES} > s.response_minutes "
+                          "THEN 1.0 ELSE 0.0 END)",
+        "required_joins": "JOIN sla_targets s ON s.priority = i.priority",
+        "filters": RESPONDED,
+        "time_column": "i.opened_at",
+        "notes": "Compares the response time with response_minutes, never with "
+                 "target_minutes. Rate or percentage questions: ROUND(100.0 * "
+                 "<sql_expression>, 1). 'How many' questions: SUM(CASE WHEN ... THEN 1 ELSE 0 "
+                 "END), never multiplied by 100.",
+    },
+    {
+        "metric_name": "escalation_rate",
+        "description": "Share of incidents that were escalated (escalated_at is set).",
+        "unit": "ratio (0-1)",
+        "base_table": "incidents",
+        "base_alias": "i",
+        "sql_expression": "AVG(CASE WHEN i.escalated_at IS NOT NULL THEN 1.0 ELSE 0.0 END)",
+        "required_joins": None,
+        "filters": None,
+        "time_column": "i.opened_at",
+        "notes": "Denominator is all incidents. Rate or percentage questions: ROUND(100.0 * "
+                 "<sql_expression>, 1). 'How many escalated' questions: the count "
+                 "SUM(CASE WHEN i.escalated_at IS NOT NULL THEN 1 ELSE 0 END), never "
+                 "multiplied by 100.",
+    },
+    {
+        "metric_name": "total_downtime",
+        "description": "Total minutes of service unavailability recorded on incidents "
+                       "(downtime_minutes; 0 = no outage, empty while still open).",
+        "unit": "minutes",
+        "base_table": "incidents",
+        "base_alias": "i",
+        "sql_expression": "SUM(i.downtime_minutes)",
+        "required_joins": None,
+        "filters": "i.downtime_minutes IS NOT NULL",
+        "time_column": "i.opened_at",
+        "notes": "Open incidents have no downtime yet and are left out. Average downtime per "
+                 "incident: AVG(i.downtime_minutes) with the same filter; 'had an outage' = "
+                 "i.downtime_minutes > 0. Divide by 60 for hours.",
     },
 ]
 METRIC_FIELDS = ["metric_name", "description", "unit", "base_table", "base_alias",
@@ -858,6 +1108,13 @@ LOOKUP_CHECKS = {
     "running totals": "running total",
     "medians": "median",
     "resolved by each agent": "agent activity",
+    "unassigned incidents": "unassigned incident",
+    "high-impact incidents": "high impact",
+    "overran": "change overrun",
+    "response times": "response time",
+    "late responses": "response breach",
+    "categories": "category",
+    "emails": "email address",
 }
 
 
@@ -890,6 +1147,11 @@ def hint_test_queries(entry):
                 source += " JOIN sla_targets s ON s.priority = i.priority"
             if "g" in aliases:
                 source += " JOIN assignment_groups g ON g.id = i.assignment_group_id"
+            if "u" in aliases:
+                person = "caller_id" if "caller" in sample else "assignee_id"
+                source += f" LEFT JOIN users u ON u.id = i.{person}"
+            if "c" in aliases:
+                source += " LEFT JOIN changes c ON c.id = i.caused_by_change_id"
         else:
             (alias,) = aliases  # non-incident hints use a single table
             source = ALIAS_FROM[alias]

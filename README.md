@@ -59,7 +59,7 @@ column lists only what that day introduced.
 |---|---|---|---|
 | 1 | ITSM database (5 tables), deterministic synthetic data, naive "question → SQL" spike | SQLite (STRICT tables), Python standard library, OpenAI SDK | ✅ Done |
 | 2 | Semantic layer: `meta_*` catalog of columns, metrics, glossary, tables and joins, with self-checks | SQL fragments stored in SQLite (`meta_*` tables) | ✅ Done |
-| 3 | Evaluation harness: 80-question golden set, scoring, self-test, 50,000-incident large dataset | PyYAML | ✅ Done |
+| 3 | Evaluation harness: 98-question golden set, scoring, self-test, 50,000-incident large dataset | PyYAML | ✅ Done |
 | 4 | NL2SQL agent: catalog context, guardrails (read-only, SELECT-only, auto-LIMIT, PII block, timeout), one SQL repair, plain-English answers with follow-ups | OpenAI gpt-4o-mini, SQLite authorizer and progress handler | ✅ Done, 80/80 live |
 | 5 | Multi-model: OpenAI and Anthropic Claude, switchable per question, with fallback | Anthropic SDK (Claude Opus 5.5), python-dotenv | ✅ Done |
 | 6 | HTTP API: ask, KPIs, table explorer, incidents, catalog, evals, SQL console, UI-vs-database check; API key, rate limit, audit log | FastAPI, Uvicorn, Pydantic | ✅ Done |
@@ -208,11 +208,12 @@ agent the missing context, stored as `meta_*` tables inside the database:
 
 - **`meta_columns`** — every column described, with examples, synonyms, and flags for personal
   data and ambiguous meaning
-- **`meta_metrics`** — `mttr`, `sla_breach_rate`, `reopen_rate` as reusable SQL, so formulas are
-  defined once and never re-invented by the agent
+- **`meta_metrics`** — `mttr`, `sla_breach_rate`, `reopen_rate`, `mean_response_time`,
+  `response_breach_rate`, `escalation_rate` and `total_downtime` as reusable SQL, so formulas
+  are defined once and never re-invented by the agent
 - **`meta_glossary`** — business vocabulary ("P1", "team", "missed SLA", "last month") mapped
-  to SQL, including terms the data cannot answer (e.g. "assignee") so the agent says so instead
-  of guessing
+  to SQL, including terms the data cannot answer (e.g. "category", "email address") so the
+  agent says so instead of guessing
 
 The build checks itself and fails loudly: every stored SQL fragment runs, every reference
 exists, no phrase maps to two meanings, and plural phrases ("tickets", "P1s") resolve correctly.

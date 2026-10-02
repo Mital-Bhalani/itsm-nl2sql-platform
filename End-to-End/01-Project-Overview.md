@@ -53,7 +53,7 @@ flowchart LR
 | **Semantic catalog** | A bare AI guesses table names and definitions. The catalog gives it the exact meaning of every column, metric and business word. | `semantics/build_catalog.py` → `meta_*` tables |
 | **Formulas defined once** | MTTR, SLA breach rate and reopen rate are stored as SQL fragments. The agent, the dashboard and the evals all use the same fragment, so numbers always agree. | `meta_metrics` |
 | **Guardrails in layers** | Keyword check, read-only connection, allow-list authorizer, row/size/time limits. Any one layer failing is caught by another. | `agent/nl2sql.py` |
-| **Refuse, don't guess** | Terms the data cannot answer ("assignee", "downtime") are refused before the AI is called. | `meta_glossary.is_answerable` |
+| **Refuse, don't guess** | Terms the data cannot answer ("category", "email address", "customer satisfaction") are refused before the AI is called. | `meta_glossary.is_answerable` |
 | **Show the working** | Every answer carries its SQL; the Data check page recomputes every screen number independently. | Ask page, `/api/reconcile` |
 | **Measure accuracy** | A golden set of questions with known answers scores the agent after every change. | `evals/` |
 | **Multi-model** | OpenAI and Anthropic behind one function; switch per question or compare side by side. | `agent/llm.py` |
@@ -74,4 +74,4 @@ A 50,000-incident version exists for scale testing. Details in
 | AI | OpenAI (`gpt-4o-mini`, default) or Anthropic (`claude-opus-5-5`) |
 | Backend | FastAPI, Uvicorn, Pydantic |
 | Front end | React 19, TypeScript, Vite, Tailwind CSS 4, TanStack Query, Recharts |
-| Quality | pytest (136 tests), Playwright end-to-end (22), golden-set evals (80 questions), GitHub Actions CI |
+| Quality | pytest (161 tests), Playwright end-to-end (22), golden-set evals (98 questions), GitHub Actions CI |

@@ -24,10 +24,10 @@ and exits with an error if anything is wrong.
 | Table | Rows | One row per | Key columns |
 |---|---|---|---|
 | `meta_tables` | 5 | data table | `description`, `grain` (what one row means) |
-| `meta_columns` | 23 | column | `data_type`, `allowed_values`, `references_to`, `description`, `example_value`, `synonyms`, `is_pii`, `is_ambiguous` + `ambiguity_note` |
-| `meta_joins` | 4 | foreign key | `cardinality`, `notes` (pitfalls, e.g. count with `COUNT(i.id)`) |
-| `meta_metrics` | 3 | metric | `sql_expression`, `base_table`, `required_joins`, `filters`, `time_column`, `unit`, `notes` |
-| `meta_glossary` | 51 | business term | `kind`, `synonyms`, `definition`, `sql_hint`, `is_answerable`, `is_ambiguous` |
+| `meta_columns` | 33 | column | `data_type`, `allowed_values`, `references_to`, `description`, `example_value`, `synonyms`, `is_pii`, `is_ambiguous` + `ambiguity_note` |
+| `meta_joins` | 7 | foreign key | `cardinality`, `notes` (pitfalls, e.g. count with `COUNT(i.id)`) |
+| `meta_metrics` | 7 | metric | `sql_expression`, `base_table`, `required_joins`, `filters`, `time_column`, `unit`, `notes` |
+| `meta_glossary` | 62 | business term | `kind`, `synonyms`, `definition`, `sql_hint`, `is_answerable`, `is_ambiguous` |
 | `meta_settings` | 3 | build setting | `as_of` (the date relative terms are anchored to), `dialect`, `built_at` |
 
 ### Metrics: formulas written once
@@ -36,6 +36,10 @@ and exits with an error if anything is wrong.
 |---|---|---|
 | `mttr` (minutes) | `AVG((julianday(i.resolved_at) - julianday(i.opened_at)) * 1440)` | Resolved/Closed |
 | `sla_breach_rate` (0–1) | `AVG(CASE WHEN <minutes> > s.target_minutes THEN 1.0 ELSE 0.0 END)` (joins `sla_targets s`) | Resolved/Closed |
+| `mean_response_time` (minutes) | `AVG((julianday(i.responded_at) - julianday(i.opened_at)) * 1440)` | `responded_at IS NOT NULL` |
+| `response_breach_rate` (0–1) | `AVG(CASE WHEN <response minutes> > s.response_minutes THEN 1.0 ELSE 0.0 END)` (joins `sla_targets s`) | `responded_at IS NOT NULL` |
+| `escalation_rate` (0–1) | `AVG(CASE WHEN i.escalated_at IS NOT NULL THEN 1.0 ELSE 0.0 END)` | none |
+| `total_downtime` (minutes) | `SUM(i.downtime_minutes)` | `downtime_minutes IS NOT NULL` |
 | `reopen_rate` (0–1) | `AVG(CASE WHEN i.reopened_count > 0 THEN 1.0 ELSE 0.0 END)` | none |
 
 A metric query is always composed the same way:
@@ -52,17 +56,25 @@ Each term has a **kind**: `entity` (incident, team…), `value` (critical priori
 |---|---|---|
 | SLA breach | breach, breached, missed SLA, late… | `i.status IN ('Resolved','Closed') AND <minutes> > s.target_minutes` |
 | last month | previous month, prior month | `{time_column} >= date('2026-09-28','start of month','-1 month') AND {time_column} < date('2026-09-28','start of month')` |
-| assignee | assigned to, owner, who fixed… | *(none: `is_answerable = 0`, so the question is refused)* |
+| assignee | owner, who fixed, who is working on… | `i.assignee_id IS NOT NULL`; the definition says to report `u.id` and `u.role`, never `u.name` |
+| change overrun | overran, ran over, finished late… | `c.actual_end IS NOT NULL AND c.actual_end > c.planned_end` |
+| forecast | predict, projection… | the last-three-full-months window; the definition gives the AVG-of-monthly-counts recipe and says to label it a projection |
+| category | categories, CI, affected service… | *(none: `is_answerable = 0`, so the question is refused)* |
 
 `{time_column}` is filled in with the column the question is about (for example
-`i.opened_at`); `{n}` is a number from the question ("severity 2").
+`i.opened_at`); `{n}` is a number from the question ("severity 2", "impact 1").
 
-**Not answerable from this data** (refused before any AI call): assignee, caller, response
-time, downtime, impact, actual change window, change-caused incident.
+**Answerable since 2026-10-02** (the schema gained their columns; each was a refusal before):
+assignee, agent activity, caller, response time, downtime, impact, escalation, actual change
+window, change-caused incident, forecast. New value terms came with them: unassigned incident,
+raised by monitoring, response breach, high/medium/low impact, change overrun.
+
+**Not answerable from this data** (refused before any AI call): category (no category, CI or
+service column), email address (contact details, also personal data), customer satisfaction.
 
 **Flagged ambiguous** (the agent picks the documented default and states its assumption):
-Resolved vs Closed, which team, SLA target meaning, change risk, "closed", "overdue",
-"next week", "impact".
+Resolved vs Closed, which team, SLA target business hours, change risk, "closed", "overdue",
+"next week".
 
 ## Looking up a phrase: `find_term()` and `singular()`
 

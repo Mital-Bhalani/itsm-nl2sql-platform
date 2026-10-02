@@ -5,7 +5,21 @@ import { Badge, Button, Card, CardTitle, ErrorBox, Input, Notice, PageHeader, PR
 import { api } from '@/lib/api'
 import { useSettings } from '@/lib/settings'
 
-const EVENT_COLORS: Record<string, string> = { Opened: '#2563EB', 'SLA due': '#111827', Resolved: '#16A34A', Closed: '#4B5563' }
+const EVENT_COLORS: Record<string, string> = {
+  Opened: '#2563EB',
+  'First response': '#0891B2',
+  Escalated: '#EA580C',
+  'SLA due': '#111827',
+  Resolved: '#16A34A',
+  Closed: '#4B5563',
+}
+const IMPACT_LABELS: Record<number, string> = { 1: 'High (site-wide)', 2: 'Medium (department)', 3: 'Low (one user)' }
+const IMPACT_COLORS: Record<number, string> = { 1: '#DC2626', 2: '#EA580C', 3: '#16A34A' }
+
+function person(id: number | null, role: string | null, fallback: string) {
+  if (id == null) return fallback
+  return `User #${id} (${role?.replace('_', ' ') ?? 'unknown role'})`
+}
 
 function Gauge({ used, targetHours, finished }: { used: number; targetHours: number; finished: boolean }) {
   const max = Math.max(150, used * 1.1)
@@ -82,6 +96,9 @@ export default function IncidentPage() {
                 <Badge color={PRIORITY_COLORS[d.priority]}>P{d.priority}</Badge>
                 <Badge color={STATUS_COLORS[d.status]}>{d.status}</Badge>
                 <Badge>{d.assignment_group}</Badge>
+                <Badge color={IMPACT_COLORS[d.impact]}>Impact {IMPACT_LABELS[d.impact]}</Badge>
+                {d.escalated_at && <Badge color="#EA580C">Escalated</Badge>}
+                {d.caused_by_change_id != null && <Badge color="#7C3AED">Caused by change #{d.caused_by_change_id}</Badge>}
                 {d.reopened_count > 0 && <Badge color="#DC2626">Reopened ×{d.reopened_count}</Badge>}
               </div>
               <div className="mt-4 grid grid-cols-2 gap-3 md:grid-cols-5">
@@ -126,6 +143,36 @@ export default function IncidentPage() {
                 )}
               </Card>
             </div>
+
+            <Card className="mt-5" data-testid="incident-people">
+              <CardTitle hint="People are shown by user id and role only; names are personal data">People, response and impact</CardTitle>
+              <div className="grid grid-cols-2 gap-3 md:grid-cols-4">
+                <Stat label="Assignee" value={<span className="text-lg">{person(d.assignee_id, d.assignee_role, 'Unassigned')}</span>} />
+                <Stat label="Raised by" value={<span className="text-lg">{person(d.caller_id, d.caller_role, 'Monitoring')}</span>} />
+                <Stat
+                  label={`First response (target ${d.response_target_minutes} min)`}
+                  value={
+                    d.response_minutes == null ? (
+                      <span className="text-lg">No response yet</span>
+                    ) : (
+                      <span className={d.response_breached ? 'text-tone-bad' : 'text-tone-ok'}>
+                        {d.response_minutes} min
+                      </span>
+                    )
+                  }
+                />
+                <Stat
+                  label="Downtime"
+                  value={<span className="text-lg">{d.downtime_minutes == null ? 'Not yet known' : d.downtime_minutes === 0 ? 'No outage' : `${d.downtime_minutes} min`}</span>}
+                />
+              </div>
+              {d.caused_by_change && (
+                <p className="mt-3 text-sm text-muted">
+                  Caused by change #{d.caused_by_change.id} ({d.caused_by_change.risk} risk, {d.caused_by_change.status}): {d.caused_by_change.description}, planned{' '}
+                  {d.caused_by_change.planned_start.slice(0, 16)} UTC.
+                </p>
+              )}
+            </Card>
 
             <Card className="mt-5">
               <CardTitle hint="Shared description words, same team and same priority">Similar incidents</CardTitle>

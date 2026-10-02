@@ -15,22 +15,27 @@ Two different kinds of checking:
 
 | File | Role |
 |---|---|
-| `golden_set.yaml` | 80 questions for the default database, each with `reference_sql`, `expected` rows and scoring options |
+| `golden_set.yaml` | 98 questions for the default database, each with `reference_sql`, `expected` rows and scoring options |
 | `golden_set_large.yaml` | The same questions for the 50,000-incident database (the file names its database) |
 | `make_golden_set.py` | Generates both files: runs each reference SQL and stores the result as the expected rows, so expected values are never typed by hand |
 | `run_evals.py` | Asks the agent each question, runs its SQL and compares the rows with the expected rows |
 
-### The 80 questions
+### The 98 questions
 
 The first 15 (E01–E04, D01–D04, J01–J04, K01–K03) were written with the agent; 35 more were
-added on 2026-09-30 from the questions a service manager would actually ask of this data.
+added on 2026-09-30 from the questions a service manager would actually ask of this data, 30
+more from the two probe rounds of 2026-10-01, and 18 on 2026-10-02 for the columns added that
+day (E17–E20, D20–D21, J25–J30, K22–K27). On the same day K03, K11 and K14–K17 changed from
+refusals to real answers (assignee of incident 101, P1 response time, top agent, escalations,
+the projection for next month, resolved per agent).
 
 | Category | IDs | Tests |
 |---|---|---|
 | Easy lookup | E01–E12 | Totals and single filters: incidents, open P1s and open tickets, on-hold, reopened (once, more than once), agents, the SLA target for P2 and for Critical in hours, high-risk and cancelled low-risk changes, the most common incident description |
 | Date range | D01–D13 | Last month, this month, per month, past month (30 days), last week, next week (D02 and the per-team D11, whose two readings give different rows), an explicit month, changes planned this month (time column `planned_start`), resolved this month (time column `resolved_at`), MTTR last month, upcoming changes |
 | Multi-table join | J01–J14 | Breaches by team last month, breach rate per priority and per team, team with the highest breach **rate** (not count), MTTR by priority and the slowest priority, reopen rate per team, open and overdue incidents per team, agents and users per team, upcoming changes per team, Service Desk incidents resolved within SLA |
-| Edge case | K01–K12 | Groups with **zero** counts that must still appear (zero breaches, no open P1s), answers that are 0 rather than empty (Network cancelled, cancelled P1s, opened in 2025, opened last month and still open), a team that does not exist, the overall reopen rate (percent or ratio), the longest-running incident, two questions that must be **refused** (assignee, response time), and K12 "incidents assigned to the Network team" (a team count that used to be refused because "assigned to" was an assignee synonym) |
+| Edge case | K01–K27 | Groups with **zero** counts that must still appear (zero breaches, no open P1s), answers that are 0 rather than empty (Network cancelled, cancelled P1s, opened in 2025, opened last month and still open), a team that does not exist, the overall reopen rate (percent or ratio), the longest-running incident, K12 "incidents assigned to the Network team" (a team count that used to be refused because "assigned to" was an assignee synonym), the probe regressions (compliance rate, median, running total, averages per month and per team), the people and response questions that used to be refused (K03, K11, K14–K17), overrun and actual-duration questions, and three questions that must be **refused** (category, email address, customer satisfaction) |
+| 2026-10-02 columns | E17–E20, D20–D21, J25–J30 | Unassigned and monitoring-raised incidents, open high-impact incidents (impact 1, not priority 2), overrunning changes, total downtime last month, escalations this quarter, P1 response breaches, the change that caused most incidents, incidents raised by managers (join on `caller_id`), response time by priority, escalation rate and downtime per team |
 
 ### How a question is scored (`score()`)
 
@@ -93,11 +98,12 @@ replies, so tests are free, fast (about 4 seconds) and repeatable.
 
 | File | Tests | Covers |
 |---|---|---|
-| `test_guardrails.py` | 11 | `guard_sql` rejections, `LIMIT` handling, keywords inside strings, assumption parsing, `users.name` blocked even via `SELECT *`, read-only database, timeout |
+| `test_guardrails.py` | 88 | `guard_sql` rejections, `LIMIT` handling, keywords inside strings, assumption parsing, `users.name` blocked even via `SELECT *`, read-only database, timeout, the SQL lint (date modifiers, join fan-out and the direct-foreign-key exception, parent filters in LEFT JOIN, every golden reference SQL lint-clean), the soft question checks, refusals (category, email, CSAT) and the former refusals that now answer |
 | `test_llm.py` | 6 | Default provider/model, key detection, missing key, unknown provider, explicit provider, fallback only when not explicit |
-| `test_api.py` | 33 | Every endpoint: health, KPIs against the known seed facts (66/440 breaches, August counts), explorer paging/filters/masking, incident and similar, catalog, ask (answer, refusal, unsafe, PII, repair, fallback answer, 503, validation), API key, rate limit, eval jobs, reconcile 25/25, SQL console, live database changes, follow-ups, feedback, cross-thread connections |
+| `test_api.py` | 39 | Every endpoint: health, KPIs against the known seed facts (66/440 breaches, August counts), explorer paging/filters/masking, incident detail (people by id and role, response, the causing change) and similar, catalog, ask (answer, refusal, unsafe, PII, repair, fallback answer, 503, validation), API key, rate limit, eval jobs, reconcile 25/25, SQL console, live database changes, follow-ups, feedback, cross-thread connections |
 | `test_security.py` | 18 | Each known attack: pragma functions, row cap, huge values, `load_extension`, timeouts, generated SQL, rate-limit bypass, model allow-list, key redaction, non-ASCII key, security headers, request id, eval cap |
-| **Total** | **68** | |
+| `test_dialect.py` | 10 | The SQLite and PostgreSQL date expressions in `db/dialect.py` |
+| **Total** | **161** | |
 
 ## Rules
 

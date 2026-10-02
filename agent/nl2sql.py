@@ -15,7 +15,7 @@ translate() turns a question into guarded SQL; ask() is the full pipeline used b
 translate -> run -> one repair attempt if SQLite rejects the SQL -> answer in plain English.
 
 Guardrails:
-    * questions that use a term the data cannot answer (e.g. "assignee") are refused
+    * questions that use a term the data cannot answer (e.g. "category") are refused
       before any API call
     * exactly one statement, SELECT or WITH only; write/admin keywords are rejected
     * valid SQL that is certainly wrong (an unknown date modifier, a join that multiplies rows) is
@@ -27,6 +27,7 @@ Guardrails:
 """
 
 import argparse
+import itertools
 import json
 import re
 import sqlite3
@@ -411,6 +412,22 @@ def _scope_tables(scope):
     return [(table, alias or table) for table, alias in found]
 
 
+def _joined_directly(scope, tables, a, b, direct):
+    """True when table a or b is joined to the other on one of its own foreign keys."""
+    aliases = {}
+    for table, alias in tables:
+        aliases.setdefault(table, set()).add(alias)
+    for child, parent in ((a, b), (b, a)):
+        for column, parent_column in direct.get((child, parent), ()):
+            for child_alias in aliases.get(child, ()):
+                for parent_alias in aliases.get(parent, ()):
+                    left = rf"\b{re.escape(child_alias)}\.{column}\b"
+                    right = rf"\b{re.escape(parent_alias)}\.{parent_column}\b"
+                    if re.search(rf"{left}\s*=\s*{right}|{right}\s*=\s*{left}", scope, re.I):
+                        return True
+    return False
+
+
 def bad_date_modifiers(sql):
     """Literal date modifiers SQLite does not know, e.g. 'start of quarter' (it returns NULL)."""
     bad = []
@@ -438,10 +455,12 @@ def lint_sql(conn, sql):
             "'start of month', 'start of year', 'weekday N'. Use a date literal or the dates "
             "given in the glossary hints.")
     try:
-        parents = {}
-        for child, parent in conn.execute("SELECT left_table, right_table FROM meta_joins "
-                                          "WHERE cardinality = 'many-to-one'"):
+        parents, direct = {}, {}
+        for child, column, parent, parent_column in conn.execute(
+                "SELECT left_table, left_column, right_table, right_column FROM meta_joins "
+                "WHERE cardinality = 'many-to-one'"):
             parents.setdefault(child, set()).add(parent)
+            direct.setdefault((child, parent), []).append((column, parent_column))
     except sqlite3.Error:
         return problems
     for scope in _select_scopes(sql):
@@ -450,12 +469,16 @@ def lint_sql(conn, sql):
         if AGGREGATE.search(scope):
             for parent in sorted({p for t in names for p in parents.get(t, ())}):
                 kids = sorted(t for t in names if parent in parents.get(t, ()))
-                if len(kids) > 1:
+                for a, b in itertools.combinations(kids, 2):
+                    # Two children of one parent fan out unless one is joined to the other on
+                    # its own foreign key (incidents -> users on assignee_id, for example).
+                    if _joined_directly(scope, tables, a, b, direct):
+                        continue
                     problems.append(
-                        f"{' and '.join(kids)} are both joined in one aggregate query. Each "
-                        f"{kids[0]} row is repeated once per matching {kids[1]} row, so every "
-                        f"count and sum is inflated. Compute each count in its own subquery or "
-                        f"CTE grouped by {parent} id, then join the results.")
+                        f"{a} and {b} are both joined in one aggregate query. Each {a} row is "
+                        f"repeated once per matching {b} row, so every count and sum is "
+                        f"inflated. Compute each count in its own subquery or CTE grouped by "
+                        f"{parent} id, then join the results.")
         base = tables[0][0] if tables else None
         for m in LEFT_JOIN.finditer(scope):
             table = m.group(1).lower()
@@ -504,6 +527,43 @@ PERCENT_WORDS = re.compile(r"percent|share|proportion|%", re.I)
 TEAM_WORDS = re.compile(r"\b(?:team|group|queue)s?\b", re.I)
 OVER_ALL_ROWS = re.compile(r"\bover\s*\(\s*\)", re.I)
 OF_TOTAL = re.compile(r"\bof\s+(?:all|the\s+total|total)\b|overall", re.I)
+# COUNT(...) / SUM(CASE ...): the group's total divided by the matching count (upside down)
+INVERTED_PERCENT = re.compile(
+    r"\bcount\s*\([^()]*\)\s*/\s*(?:nullif\s*\(\s*)?sum\s*\(\s*case\b", re.I)
+# questions whose answer must keep the groups that have no matching rows
+KEEP_ZERO_WORDS = re.compile(r"\b(zero|no|none|each|every|per|all)\b|\bwhich\s+teams?\b", re.I)
+ANY_JOIN = re.compile(
+    r"\b(left\s+(?:outer\s+)?)?join\s+([A-Za-z_]\w*)(?:\s+(?:as\s+)?([A-Za-z_]\w*))?\s+on\s+"
+    r"(.*?)(?=\bleft\b|\binner\b|\bjoin\b|\bwhere\b|\bgroup\b|\border\b|\bhaving\b|\blimit\b|$)",
+    re.I | re.S)
+WHERE_CLAUSE = re.compile(r"\bwhere\b(.*?)(?=\bgroup\b|\border\b|\bhaving\b|\blimit\b|$)", re.I | re.S)
+
+
+def _left_join_leaks(scope, children):
+    """
+    Conditions that silently turn a LEFT JOIN of a child table (incidents, changes, users)
+    back into an inner join and drop the parents with zero rows: a WHERE on the child's
+    columns, or a plain JOIN after it whose ON clause uses the child's columns.
+    """
+    left_aliases = []
+    for m in ANY_JOIN.finditer(scope):
+        table = m.group(2).lower()
+        alias = (m.group(3) or table).lower()
+        alias = table if alias in SQL_WORDS else alias
+        if m.group(1):
+            if table in children:
+                left_aliases.append(alias)
+        elif any(re.search(rf"\b{re.escape(a)}\.", m.group(4)) for a in left_aliases):
+            return (f"JOIN {table} comes after a LEFT JOIN and uses that table's columns, which "
+                    f"drops every group with no rows. Make it LEFT JOIN {table} too (or move it "
+                    "inside a subquery).")
+    where = WHERE_CLAUSE.search(scope)
+    for alias in left_aliases:
+        if where and re.search(rf"\b{re.escape(alias)}\.\w+", where.group(1)):
+            return (f"The WHERE clause filters {alias}.*, a LEFT JOINed table, so the groups with "
+                    "no matching rows disappear. Put every condition on that table in its LEFT "
+                    "JOIN's ON clause (or a subquery) and count with COUNT(alias.id).")
+    return None
 
 
 def _select_items(scope):
@@ -520,12 +580,23 @@ def _select_items(scope):
     return items + [text[start:]]
 
 
-def lint_question(question, sql, resolved):
+def child_tables(conn):
+    """Tables on the many side of a foreign key (incidents, changes, users), from meta_joins."""
+    try:
+        return {r[0] for r in conn.execute(
+            "SELECT DISTINCT left_table FROM meta_joins WHERE cardinality = 'many-to-one'")}
+    except sqlite3.Error:
+        return set()
+
+
+def lint_question(question, sql, resolved, children=()):
     """
     Soft problems: the SQL adds a filter the question did not ask for, or returns the wrong shape
     (an aggregate where rows were asked for, unlabelled per-group rows where one number was).
     `resolved` = [(phrase, glossary row)] from resolve_terms; a term whose hint contains the
-    filter justifies it (for example 'overdue' justifies the open statuses).
+    filter justifies it (for example 'overdue' justifies the open statuses). `children` = the
+    child tables from child_tables(conn), used to spot a LEFT JOIN that a later WHERE or JOIN
+    turns back into an inner join.
     """
     problems = []
     hints = " ".join((entry["sql_hint"] or "") for _, entry in resolved)
@@ -575,6 +646,34 @@ def lint_question(question, sql, resolved):
             "A percentage per team is the team's own count over the team's own total, for example "
             "100.0 * SUM(i.priority = 1) / COUNT(*), not the team's share of the grand total "
             "(SUM(...) OVER ()). Use the share of the grand total only if the question asks for it.")
+    if children and KEEP_ZERO_WORDS.search(question):
+        leak = _left_join_leaks(top, children)
+        if leak:
+            problems.append(leak)
+    for _, entry in resolved:
+        # "this month / quarter / year" starts on its first day, not on the as-of date
+        if entry["kind"] == "time" and entry["term"].startswith("this ") and entry["sql_hint"]:
+            as_of = re.search(r"date\('(\d{4}-\d{2}-\d{2})',\s*'start of", entry["sql_hint"])
+            if as_of and re.search(rf">=\s*'{as_of.group(1)}'", sql):
+                problems.append(
+                    f"'{entry['term']}' runs from the first day of the period, not from the as-of "
+                    f"date: use the window exactly as in the glossary hint, {entry['sql_hint']}.")
+        # a forecast averages the past months named in its hint; a window after the as-of date
+        # has no rows and silently returns NULL
+        if entry["term"] == "forecast" and entry["sql_hint"]:
+            dates = re.findall(r"'(\d{4}-\d{2}-\d{2})'", entry["sql_hint"])
+            if dates and not all(d in sql for d in dates):
+                problems.append(
+                    "A forecast is the average of the monthly counts over the past months in the "
+                    f"glossary hint, so the SQL must use that window exactly: {entry['sql_hint']} "
+                    "(with i.opened_at as the time column). Months after the as-of date hold no "
+                    "data and would give NULL.")
+            break
+    if PERCENT_WORDS.search(question) and INVERTED_PERCENT.search(top):
+        problems.append(
+            "The percentage is upside down: COUNT(*) is divided by the matching count. A percentage "
+            "of rows that meet a condition is 100.0 * SUM(CASE WHEN <condition> THEN 1 ELSE 0 END) "
+            "/ COUNT(*): the matching count on top, the group's total underneath.")
     if only_aggregates and grouped and HOW_MANY.match(question) and not PER_GROUP.search(question):
         problems.append(
             "The question asks for one number, but GROUP BY makes the SQL return one unlabelled row "
@@ -615,7 +714,7 @@ def _lint_and_repair(conn, result, context, question, resolved, history, provide
     """
     if result["unsafe"] or not result["sql"]:
         return
-    soft = [] if history else lint_question(question, result["sql"], resolved)
+    soft = [] if history else lint_question(question, result["sql"], resolved, child_tables(conn))
     problems = lint_sql(conn, result["sql"]) + soft
     result["lint"] = problems
     if not problems:
@@ -675,8 +774,10 @@ ANSWER_PROMPT = (
     "no matching records were found. If an assumption is listed, mention it briefly. Do not "
     "mention SQL, tables or columns.\n\n"
     "Also suggest three short follow-up questions a service manager might ask next that this "
-    "data can answer (teams, priorities, statuses, SLA breaches, MTTR, reopen rate, changes by "
-    "risk, time periods). Never suggest questions about named people, assignees or callers.\n\n"
+    "data can answer (teams, priorities, impact, statuses, SLA breaches, response times, MTTR, "
+    "reopen rate, escalations, downtime, changes by risk, time periods). People are known only "
+    "by user id and role: never suggest questions that need a person's name or contact "
+    "details.\n\n"
     'Reply with JSON only: {"answer": "...", "followups": ["...", "...", "..."]}')
 
 

@@ -16,9 +16,13 @@ stdlib where possible. `db/` and `semantics/` are stdlib only. `requirements.txt
 makes `OpenAI()` crash with `unexpected keyword argument 'proxies'`. Drop the pin only if openai
 is upgraded (to 1.55.3 or later).
 
-**Current objective (2026-09-30):** end-product build done — multi-model agent, FastAPI
+**Current objective (2026-10-02):** end-product build done — multi-model agent, FastAPI
 backend, React UI with a UI-vs-database check, pytest suite. The Streamlit UI was removed on
-2026-09-30 (React is the only front end). Next: the open items below.
+2026-09-30 (React is the only front end). On 2026-10-02 the ten glossary terms that were
+"not answerable" (assignee, caller, response time, downtime, impact, actual change window,
+change-caused incident, escalation, forecast, agent activity) became answerable: the schema
+gained the columns (see Database), the seed fills them without changing any existing value,
+and the golden set grew to 98. Next: the open items below.
 
 ## Build and run (in this order)
 
@@ -30,7 +34,7 @@ python evals/run_evals.py           # score the agent on evals/golden_set.yaml (
 python agent/naive_spike.py         # Day 1 naive spike (no context; shows why the agent is needed)
 python run_app.py                   # API :8000 (/docs), React UI at :8000/web/, Ctrl+C stops it
 cd web && npm run build            # React UI -> web/dist, served by the API at /web/ (npm run dev: :5173)
-python -B -m pytest tests -p no:cacheprovider   # 136 tests, no API key, temp DB outside repo
+python -B -m pytest tests -p no:cacheprovider   # 161 tests, no API key, temp DB outside repo
 cd web && npm run e2e              # 22 Playwright checks in Edge; starts its own API on :8010 (E2E_PORT=8000 reuses a running one)
 ```
 
@@ -89,11 +93,11 @@ read-only · **SELECT-only** · auto-LIMIT · **no raw PII in output** (`users.n
 | `db/` | 1 | **done**: `schema.sql`, `seed.py`, generated `tickets.sqlite` (gitignored `*.sqlite`); `dialect.py` (SQLite/PostgreSQL date expressions) |
 | `agent/` | 1 → 2–3 | `naive_spike.py`, **`nl2sql.py`** (agent: `translate`, `ask`), **`llm.py`** (providers) |
 | `semantics/` | 2 | **done**: `build_catalog.py` fills all five meta_* tables |
-| `evals/` | 2 | **done**: `golden_set.yaml` (80 questions) + `run_evals.py` + `make_golden_set.py` |
+| `evals/` | 2 | **done**: `golden_set.yaml` (98 questions) + `run_evals.py` + `make_golden_set.py` |
 | `api/` | 3 | **done**: FastAPI (`main.py`, `services.py`, `schemas.py`, `config.py`, `state.py` = SQLite store for rate limits and eval jobs) |
 | `web/` | 4 | **done**: React 19 + TS + Tailwind 4 + TanStack Query + Recharts; built to `web/dist`, served at `/web/` |
 | `End-to-End/` | — | **done**: 11-chapter project guide (hierarchy, every script/component, request lifecycle, security, operations); update it when code changes |
-| `tests/` | — | **done**: pytest, 136 tests (guardrails, SQL lint, providers, dialect, API with a fake model, state store, security attacks) + `web/e2e` Playwright (22) |
+| `tests/` | — | **done**: pytest, 161 tests (guardrails, SQL lint, providers, dialect, API with a fake model, state store, security attacks) + `web/e2e` Playwright (22) |
 
 `scripts/`, `docs/` and `spike/` from the original plan were not created: the data generator
 lives in `db/seed.py` and the spike in `agent/naive_spike.py`. There is no `db/build_db.py`.
@@ -107,11 +111,31 @@ Reads `OPENAI_API_KEY` from the project-root `.env`. Its purpose is to show the 
 ## Database (`db/schema.sql`)
 
 Five tables: `assignment_groups` (teams), `users`, `sla_targets` (minutes per priority),
-`incidents`, `changes`. Joins:
+`changes`, `incidents` (created in that order: incidents reference changes). Joins:
 - `incidents.assignment_group_id`, `changes.assignment_group_id`, `users.assignment_group_id`
   → `assignment_groups.id` (users' group is NULL for managers/admins)
 - `incidents.priority` → `sla_targets.priority`
-- No link incidents → users (no assignee/caller) and none incidents → changes.
+- **Since 2026-10-02:** `incidents.assignee_id` and `incidents.caller_id` → `users.id`;
+  `incidents.caused_by_change_id` → `changes.id`. Before that there was no link incidents →
+  users or incidents → changes and those questions were refused.
+
+**Columns added 2026-10-02** (all seeded by a second generator, see Sample data):
+- `sla_targets.response_minutes` (first-response target: 30 / 60 / 240 / 480; always <
+  `target_minutes`).
+- `incidents.impact` 1–3 NOT NULL (1 High site-wide, 2 Medium department, 3 Low one user;
+  separate from priority — "high impact" is impact 1, not priority 2).
+- `incidents.assignee_id` + `incidents.responded_at`: set together, NULL iff nobody picked the
+  incident up (always NULL while New); assignee is an agent or team lead of the owning team;
+  `responded_at` between `opened_at` and `resolved_at`. Response breach = response minutes >
+  `response_minutes` (derived, like SLA breach).
+- `incidents.caller_id`: NULL = raised by monitoring (any user role otherwise).
+- `incidents.escalated_at`: NULL = never escalated.
+- `incidents.downtime_minutes`: NULL iff status is open; 0 = no outage.
+- `incidents.caused_by_change_id`: the team's most recent started change within 14 days before
+  `opened_at`, for ~15% of incidents that have one; NULL otherwise.
+- `changes.actual_start` (set iff status Implement/Review/Closed) and `changes.actual_end` (set
+  iff Review/Closed). Overrun = `actual_end > planned_end`.
+- People are still reported by `users.id` + `users.role` only; `users.name` stays blocked.
 
 Conventions: timestamps are TEXT `'YYYY-MM-DD HH:MM:SS'` UTC; status/risk/role are CHECK lists;
 every connection must run `PRAGMA foreign_keys = ON`; tables are STRICT.
@@ -142,6 +166,15 @@ comment mirrors it.
 
 Deterministic: `random.Random(42)` and fixed anchor **NOW = 2026-09-28 00:00 UTC** (a Monday).
 "Today", "last month" (= August 2026) etc. are relative to this date, not the real clock.
+The 2026-10-02 columns are filled by a **second generator** `random.Random(43)` (`EXTRA_SEED`)
+in `enrich_changes` / `enrich_incidents` after the original rows exist, so **every original
+column is byte-identical to before** at any size (verified against the pre-change database);
+only the new columns were added. Default-size facts for them: 12 unassigned, 97 raised by
+monitoring, 55 escalated, 71 with downtime, 34 caused by a change (change 78 caused 3, next 2),
+37/488 late first responses (7.6%), 23/86 finished changes overran; top resolver user 1 (a team
+lead, 24), top agent-role resolver user 17 (20); impact mix 38/169/293; forecast (avg of
+Jun–Aug) = 80.0. Large set: response breaches 4,806/48,177 (10.0%), 7,537 change-caused,
+1,655/8,124 overran, top resolver user 1 (2,293), top causing change 7246 (106).
 
 Expected output (verified identical across runs): 5 groups · 40 users (31 agents, 5 team
 leads, 3 managers, 1 admin) · 4 SLA targets · 500 incidents · 100 changes (90 past, 10 in
@@ -182,11 +215,11 @@ byte-identically).
 
 | table | rows | content |
 |---|---|---|
-| `meta_columns` | 23 | type, nullability, keys, FK, allowed values (read from schema.sql) + drafted description, example, `is_pii`, `is_ambiguous`/note, `synonyms` |
-| `meta_metrics` | 3 | `mttr` (minutes), `sla_breach_rate`, `reopen_rate` (ratio 0–1) as reusable SQL fragments |
-| `meta_glossary` | 51 | business terms → entity / value / metric / time / concept, with `sql_hint` |
+| `meta_columns` | 33 | type, nullability, keys, FK, allowed values (read from schema.sql) + drafted description, example, `is_pii`, `is_ambiguous`/note, `synonyms` |
+| `meta_metrics` | 7 | `mttr`, `mean_response_time`, `total_downtime` (minutes), `sla_breach_rate`, `response_breach_rate`, `escalation_rate`, `reopen_rate` (ratio 0–1) as reusable SQL fragments |
+| `meta_glossary` | 62 | business terms → entity / value / metric / time / concept, with `sql_hint` |
 | `meta_tables` | 5 | description and grain per data table (`TABLE_DRAFTS`) |
-| `meta_joins` | 4 | one row per schema foreign key, with cardinality and pitfalls (`JOINS`); build fails if they drift |
+| `meta_joins` | 7 | one row per schema foreign key, with cardinality and pitfalls (`JOINS`); build fails if they drift |
 
 - Metric composition: `SELECT <sql_expression> FROM <base_table> <base_alias>
   <required_joins> WHERE <filters> [AND question filters on <time_column>]`. All use alias `i`,
@@ -203,11 +236,22 @@ byte-identically).
   here, not by adding plural synonyms to the glossary.
 - Still flagged ambiguous — columns: `incidents.status` (Resolved vs Closed),
   `incidents.resolved_at` (latest resolution), `incidents.assignment_group_id` (which team),
-  `sla_targets.target_minutes` (resolution vs response, business hours), `changes.risk`,
-  `users.assignment_group_id`. Glossary: `closed` (default = Resolved or Closed), `overdue`
-  (open and past target), `next week` (calendar week after the current one), `impact`.
-- Not answerable from this data (`is_answerable = 0`): assignee, caller, response time,
-  downtime, impact, actual change window, change-caused incident.
+  `sla_targets.target_minutes` (business hours; the resolution-vs-response doubt is settled by
+  `response_minutes`), `changes.risk`, `users.assignment_group_id`. Glossary: `closed`
+  (default = Resolved or Closed), `overdue` (open and past target), `next week` (calendar week
+  after the current one).
+- **Answerable since 2026-10-02** (each was `is_answerable = 0` before): assignee, agent
+  activity, caller, response time (metric `mean_response_time`), downtime (metric
+  `total_downtime`), impact (`i.impact = {n}` + high/medium/low impact terms), escalation
+  (+ `escalation rate`), actual change window (+ `change overrun`), change-caused incident,
+  forecast (= AVG of the monthly counts over the last three full months, labelled a projection;
+  the platform still has no forecasting model). New value terms: `unassigned incident`,
+  `raised by monitoring`, `response breach`. The hint test (`hint_test_queries`) joins users on
+  `assignee_id` (or `caller_id` when the hint mentions caller) and changes on
+  `caused_by_change_id`.
+- Not answerable from this data (`is_answerable = 0`): `category` (no category/CI/service
+  column), `email address` (contact details), `customer satisfaction` (no surveys). These
+  keep the refusal path tested (K25–K27, `tests/test_guardrails.py`).
 
 ## Agent (`agent/nl2sql.py`)
 
@@ -220,9 +264,12 @@ byte-identically).
 4. **SQL lint** (`lint_sql`, added 2026-10-01): SQL that runs but is certainly wrong is sent back to
    the model once, then blocked (`unsafe`) if still wrong: an unknown date modifier (SQLite returns
    NULL for `'start of quarter'`, so a count silently became 0), two child tables (incidents,
-   changes, users) joined in one aggregate query (join fan-out multiplies every count), and a
-   filter on the parent table inside a `LEFT JOIN ... ON` (removes no rows). Join paths come from
-   `meta_joins`; the golden-set reference SQL must lint clean (a test checks it). Also caught before
+   changes, users) joined in one aggregate query (join fan-out multiplies every count) **unless
+   one is joined to the other on its own foreign key** (`_joined_directly`, 2026-10-02:
+   `incidents JOIN users ON u.id = i.assignee_id` and `JOIN changes ON c.id =
+   i.caused_by_change_id` are many-to-one and fine; joining them through the team is still
+   flagged), and a filter on the parent table inside a `LEFT JOIN ... ON` (removes no rows). Join
+   paths come from `meta_joins`; the golden-set reference SQL must lint clean (a test checks it). Also caught before
    running: SQL that SQLite rejects (`EXPLAIN`), so the repair call now happens inside `translate()`.
    **Soft checks** (`lint_question`, same 2026-10-01 round) compare the SQL with the question and
    trigger one repair call but never block: an open-status filter nobody asked for ("P1 incidents",
@@ -230,8 +277,14 @@ byte-identically).
    "show/list" answered with one aggregate (MIN/COUNT instead of rows), "how many teams..." answered
    with one row per team, "average number of X per Y" returned per group or divided by a fixed 12,
    "X per agent" returned as two counts instead of a ratio, a time of day ("9am to 5pm") compared
-   with one day's timestamp instead of the hour of day, and a per-team percentage computed as the
-   team's share of the grand total (`OVER ()`) instead of its own proportion.
+   with one day's timestamp instead of the hour of day, a per-team percentage computed as the
+   team's share of the grand total (`OVER ()`) instead of its own proportion, and (2026-10-02) an
+   upside-down percentage, `COUNT(*) / SUM(CASE ...)`, where the matching count belongs on top; a
+   forecast that does not use the glossary's past-months window; "this month/year" started at the
+   as-of date instead of the 1st; and, for zero/each/per-team questions, a LEFT JOIN of a child
+   table (from `meta_joins`, passed as `child_tables(conn)`) undone by a later WHERE or plain
+   JOIN on its columns (`_left_join_leaks`). The last four were added after the 2026-10-02 catalog
+   growth made K16, D07 and K01 fail deterministically with the longer prompt.
    Follow-up questions skip the soft checks. Glossary terms `median` and `running total` carry the SQL
    recipe (SQLite has no MEDIAN).
 5. Guardrails: one SELECT/WITH statement, write/admin keywords rejected, DB opened read-only,
@@ -252,7 +305,9 @@ temperature 0) and `anthropic` (default `claude-opus-5-5`, effort `low`, system 
 for prompt caching, server-side refusal fallback `fallbacks="default"`; current Claude models
 reject `temperature`). Env: `LLM_PROVIDER`, `LLM_MODEL`, `LLM_FALLBACK_PROVIDER`,
 `OPENAI_API_KEY`/`OPENAI_MODEL`, `ANTHROPIC_API_KEY`/`ANTHROPIC_MODEL`. Fallback applies only
-when no provider was requested explicitly. All failures raise `AgentAPIError` (re-exported by
+when no provider was requested explicitly. An OpenAI 429 (tokens-per-minute limit, hit on
+2026-10-02 when an eval run sent ~6k-token prompts back to back) is retried up to 3 times with
+5/10/15 s waits (`RATE_LIMIT_RETRIES`, `RATE_LIMIT_WAIT_S`) before it becomes `AgentAPIError`. All failures raise `AgentAPIError` (re-exported by
 `nl2sql`). `anthropic` 1.x uses `httpx2`, so it does not conflict with the `httpx==0.27.2` pin.
 **Anthropic has not been run live yet** (no `ANTHROPIC_API_KEY` as of 2026-09-29); it is
 covered only by mocked tests.
@@ -492,6 +547,26 @@ Then **J16, D19 and J23 were fixed** with three more soft checks (see the Agent 
 when re-run alone: its first draft adds an open filter and the lint repairs it). Intermittent, each
 passing in other runs: J07 (counts every user, not only role agent), J01 (once invented the window
 `date('2026-08-28')`), J15, J17. J23 is settled as the team's own proportion of P1 incidents.
+
+**Ten unanswerable terms made answerable (2026-10-02).** User asked why the catalog flagged
+terms as not answerable (answer: no columns) and then to fix all ten. Done by adding the data,
+not by loosening the catalog: schema (10 new columns, 3 FKs), seed (second generator, original
+values unchanged), catalog (33 columns, 7 joins, 7 metrics, 62 terms; 3 new refusal terms
+`category`, `email address`, `customer satisfaction` so the refusal path stays covered), lint
+(`_joined_directly`), API incident detail (assignee/caller as id + role, first response,
+escalation, downtime, causing change; timeline events "First response" and "Escalated"),
+React Incident page card "People, response and impact", golden sets (K03, K11, K14–K17 turned
+from refusals into answers; 18 new questions; 98 total, self-test 98/98 both sets), tests
+(161), docs. People are never named: `users.name` stays blocked and the answer prompt says so.
+**Live gpt-4o-mini on the 98 questions (2026-10-02):** run 1 (right after the catalog growth)
+91/98 default, 92/98 large: J04/J07/J14 returned `g.id` instead of `g.name` (the new
+"identify a person by id" wording leaked onto teams; fixed by saying team names are fine), J23
+upside-down percentage, K20 borrowed the forecast's 3-month window, K16 used 1 month. Run 2 after
+those fixes: 95/98 default (K01, D07, K16); run 3: 96/98 default (K01 WHERE after LEFT JOIN, D07
+"this month" started at the as-of date). Both large runs stopped on OpenAI 429 / connection
+errors (retry added to `llm.py`). Soft checks for K01, D07 and K16 were then added; run 4 was
+still in progress at commit time, so re-run `python evals/run_evals.py` on both sets to get the
+current score. Every one of the 18 new questions and the 6 converted refusals passed in all runs.
 
 ## Open items / next steps
 

@@ -29,7 +29,7 @@ Every `/api/*` endpoint takes `dataset=default|large` and needs the `X-API-Key` 
 | GET | `/api/groups` | Teams (id, name) | Filters |
 | GET | `/api/tables` | Data tables with description, row count and columns | Explorer |
 | GET | `/api/tables/{name}` | One page of a table; `f_<column>=value` filters, `search`, `sort`, `desc`, `page`, `size` (≤ 200) | Explorer |
-| GET | `/api/incidents/{id}` | Incident + team + SLA target, time used, breach flag, SLA due time, timeline | Incident |
+| GET | `/api/incidents/{id}` | Incident + team + SLA target, time used, breach flag, SLA due time, impact, assignee/caller (id + role), first response, escalation, downtime, causing change, timeline | Incident |
 | GET | `/api/incidents/{id}/similar` | Most similar incidents (shared description words, same team, same priority) | Incident |
 | POST | `/api/feedback` | Thumbs up/down on an answer → audit log (rate-limited) | Ask |
 | GET | `/api/catalog/{section}` | `tables`, `columns`, `joins`, `metrics` or `glossary` | Catalog |

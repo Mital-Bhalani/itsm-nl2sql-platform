@@ -105,7 +105,7 @@ export default function HomePage() {
         <ul className="list-disc space-y-1 pl-5 text-sm text-ink-2">
           <li>The database is opened read-only; only one SELECT can run, with a row limit and a 5-second timeout.</li>
           <li>Personal data (user names) is masked in the explorer and blocked in generated SQL.</li>
-          <li>Questions about data that does not exist (assignee, caller, downtime…) are refused instead of guessed.</li>
+          <li>People appear as user id and role only. Questions about data that does not exist (categories, contact details, satisfaction scores…) are refused instead of guessed.</li>
           <li>Every question is recorded in the API's audit log with the SQL and model used.</li>
         </ul>
       </Card>

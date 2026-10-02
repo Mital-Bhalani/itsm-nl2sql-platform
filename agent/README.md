@@ -4,7 +4,8 @@
 catalog, builds the prompt entirely from the `meta_*` tables, asks the OpenAI API for one SQLite
 query, and applies the guardrails (SELECT-only, single statement, read-only database, automatic
 `LIMIT 1000`, no personal data). Questions about things the data does not record, such as an
-incident's assignee, are refused before any API call.
+incident's category or a person's email address, are refused before any API call. People are
+reported by user id and role only (`users.name` is blocked).
 
 ```
 python agent/nl2sql.py "which assignment groups breached SLA most last month?"

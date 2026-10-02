@@ -63,11 +63,28 @@ def test_explorer_rejects_unknown_or_personal(client, path, params):
 def test_incident_detail(client):
     body = client.get("/api/incidents/1").json()
     assert body["assignment_group"] and body["target_minutes"] > 0
+    assert body["impact"] in (1, 2, 3) and "assignee_id" in body and "caller_id" in body
+    assert body["response_target_minutes"] < body["target_minutes"]
+    if body["assignee_id"] is not None:
+        assert body["assignee_role"] in ("agent", "team_lead") and body["response_minutes"] >= 0
+        assert any(e["event"] == "First response" for e in body["timeline"])
+    assert "name" not in body and not any(k.endswith("_name") for k in body)
     assert client.get("/api/incidents/999999").status_code == 404
 
 
+def test_incident_detail_shows_the_causing_change(client, db_path):
+    import sqlite3
+    conn = sqlite3.connect(db_path)
+    incident_id, change_id = conn.execute(
+        "SELECT id, caused_by_change_id FROM incidents WHERE caused_by_change_id IS NOT NULL "
+        "ORDER BY id LIMIT 1").fetchone()
+    conn.close()
+    body = client.get(f"/api/incidents/{incident_id}").json()
+    assert body["caused_by_change"]["id"] == change_id and body["caused_by_change"]["description"]
+
+
 def test_catalog_sections(client):
-    assert len(client.get("/api/catalog/metrics").json()) == 3
+    assert len(client.get("/api/catalog/metrics").json()) == 7
     assert any(g["term"] == "SLA breach" for g in client.get("/api/catalog/glossary").json())
 
 
@@ -85,7 +102,7 @@ def test_ask_answers_with_sql_and_audit(client, api_app, fake_model):
 
 def test_ask_refuses_without_calling_the_model(client, fake_model):
     _, calls = fake_model
-    body = client.post("/api/ask", json={"question": "Who is the assignee of most P1 tickets?"}).json()
+    body = client.post("/api/ask", json={"question": "Which category has the most P1 tickets?"}).json()
     assert body["refusal"] and body["sql"] is None and calls == []
 
 
@@ -141,7 +158,7 @@ def test_api_key_required_when_configured(client, api_app, monkeypatch):
 def test_rate_limit(client, api_app, monkeypatch, fake_model):
     monkeypatch.setattr(api_app.settings, "rate_limit_per_min", 2)
     api_app.state.clear_rate_hits()
-    codes = [client.post("/api/ask", json={"question": "Who is the assignee?"}).status_code for _ in range(3)]
+    codes = [client.post("/api/ask", json={"question": "What is the CSAT score?"}).status_code for _ in range(3)]
     assert codes == [200, 200, 429]
     api_app.state.clear_rate_hits()
 
@@ -153,7 +170,7 @@ def test_self_test_eval_job(client):
         if job["status"] in ("done", "failed"):
             break
         time.sleep(0.1)
-    assert job["status"] == "done" and job["passed"] == job["total"] == 80
+    assert job["status"] == "done" and job["passed"] == job["total"] == 98
 
 
 def test_live_eval_needs_a_configured_provider(client, monkeypatch):
@@ -181,7 +198,7 @@ def test_changes_in_the_database_show_up_without_restart(client, db_path):
     conn = sqlite3.connect(db_path)
     try:
         conn.execute("INSERT INTO incidents (id, short_desc, priority, status, assignment_group_id, "
-                     "opened_at) VALUES (99999, 'test row', 1, 'New', 1, '2026-09-27 12:00:00')")
+                     "opened_at, impact) VALUES (99999, 'test row', 1, 'New', 1, '2026-09-27 12:00:00', 2)")
         conn.commit()
         assert client.get("/api/kpis").json()["headline"]["open"] == before + 1
         assert client.get("/api/incidents/99999").json()["short_desc"] == "test row"

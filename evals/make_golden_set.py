@@ -4,7 +4,7 @@ Generate a golden eval set: every expected value comes from running its referenc
     python evals/make_golden_set.py            # db/tickets.sqlite -> evals/golden_set.yaml
     python evals/make_golden_set.py --db db/tickets_large.sqlite --out evals/golden_set_large.yaml
 
-The 80 questions and their reference SQL are defined once below (Q); only the expected rows
+The 98 questions and their reference SQL are defined once below (Q); only the expected rows
 depend on the database. Regenerate whenever db/seed.py or the database size changes.
 """
 import argparse
@@ -25,6 +25,10 @@ THIS_MONTH = "i.opened_at >= '2026-09-01' AND i.opened_at < '2026-09-28'"
 MTTR = f"AVG({MINUTES})"
 OVERDUE = f"{OPEN} AND (julianday('2026-09-28') - julianday(i.opened_at)) * 1440 > s.target_minutes"
 BREACH_PCT = f"ROUND(100.0 * AVG(CASE WHEN {BREACHED} THEN 1.0 ELSE 0.0 END), 1)"
+RESPONSE_MINUTES = "(julianday(i.responded_at) - julianday(i.opened_at)) * 1440"
+RESPONDED = "i.responded_at IS NOT NULL"
+# the agreed "forecast": the average monthly intake over the last three full months (Jun-Aug 2026)
+LAST_3_MONTHS = "i.opened_at >= '2026-06-01' AND i.opened_at < '2026-09-01'"
 
 Q = [
     # ---------------- easy lookups ----------------
@@ -114,10 +118,10 @@ Q = [
          notes="Correct answer is 0, not an empty result or an error. The team exists but has no "
                "cancelled incidents."),
     dict(id="K03", category="edge_case", question="Who is the assignee of incident 101?",
-         refusal=True,
-         notes="Not answerable: incidents link to a team, not a person (glossary 'assignee', "
-               "is_answerable = 0). Pass = the answer says the data does not record assignees and "
-               "may offer the team instead; it must not join users and name a person."),
+         sql="SELECT i.assignee_id FROM incidents i WHERE i.id = 101",
+         notes="Was a refusal until 2026-10-02; incidents.assignee_id now exists. The answer is the "
+               "user id (30 at the default size; extra columns such as the role are allowed). It must "
+               "never select users.name."),
 
     # =====================================================================================
     #  Added 2026-09-30: 36 more questions a service manager would ask of this data (K12 last).
@@ -352,9 +356,16 @@ Q = [
          notes="Resolved or closed only (open incidents have no resolved_at). Only the id is compared."),
     dict(id="K11", category="edge_case",
          question="What was the response time for P1 incidents last month?",
-         refusal=True,
-         notes="Not answerable: response time is not stored (glossary 'response time', is_answerable = 0). "
-               "Pass = the answer says so; it must not return resolution time as if it were response time."),
+         sql=f"SELECT AVG({RESPONSE_MINUTES}) AS response_minutes FROM incidents i "
+             f"WHERE i.priority = 1 AND {RESPONDED} AND {LAST_MONTH}",
+         tolerance=0.5,
+         alternatives=[dict(reading="in hours",
+                            sql=f"SELECT AVG({RESPONSE_MINUTES}) / 60.0 AS response_hours FROM incidents i "
+                                f"WHERE i.priority = 1 AND {RESPONDED} AND {LAST_MONTH}")],
+         notes="Was a refusal until 2026-10-02; incidents.responded_at now exists. Mean minutes from "
+               "opened_at to the first response (metric mean_response_time) for P1 incidents opened in "
+               "August 2026: about 10.5 at the default size. Returning the resolution time (MTTR) instead "
+               "is a failure."),
     dict(id="K12", category="edge_case", question="How many incidents are assigned to the Network team?",
          sql="SELECT COUNT(i.id) AS incidents FROM incidents i "
              "JOIN assignment_groups g ON g.id = i.assignment_group_id WHERE g.name = 'Network'",
@@ -425,21 +436,40 @@ Q = [
          notes="Compliance = 1 - breach rate = 85.0% (0.85 also accepted). The agent returned the breach "
                "rate, 15.0, under the name sla_compliance_rate."),
     dict(id="K14", category="edge_case", question="Which agent resolved the most incidents?",
-         refusal=True,
-         notes="Not answerable: incidents link to a team, not a person (glossary 'agent activity'). "
-               "The agent used to join users to incidents through the team and name a user id."),
+         sql=f"SELECT i.assignee_id FROM incidents i WHERE {FINISHED} "
+             f"GROUP BY i.assignee_id ORDER BY COUNT(*) DESC, i.assignee_id LIMIT 1",
+         ambiguous=True,
+         alternatives=[dict(reading="users with role agent only (team leads left out)",
+                            sql=f"SELECT i.assignee_id FROM incidents i JOIN users u ON u.id = i.assignee_id "
+                                f"WHERE {FINISHED} AND u.role = 'agent' "
+                                f"GROUP BY i.assignee_id ORDER BY COUNT(*) DESC, i.assignee_id LIMIT 1")],
+         notes="Was a refusal until 2026-10-02; incidents.assignee_id now exists. Resolved or closed "
+               "incidents grouped by assignee: user 1 (a team lead) with 24 at the default size; under "
+               "the agents-only reading user 17 with 20. Only the user id is compared; the name must "
+               "never appear. Joining users through the team (the old fan-out) is a failure."),
     dict(id="K15", category="edge_case", question="How many incidents were escalated?",
-         refusal=True,
-         notes="Not answerable: there is no escalation column or status (glossary 'escalation'). "
-               "The agent used to invent status = 'Escalated' and answer 0."),
+         sql="SELECT COUNT(*) AS escalated FROM incidents i WHERE i.escalated_at IS NOT NULL",
+         notes="Was a refusal until 2026-10-02; incidents.escalated_at now exists (55 at the default "
+               "size). Inventing status = 'Escalated' gives 0 and is a failure."),
     dict(id="K16", category="edge_case", question="Predict how many incidents will be opened next month",
-         refusal=True,
-         notes="Not answerable: the platform does not forecast (glossary 'forecast'). The agent used to "
-               "count future rows and label the 0 'predicted_incidents'."),
+         sql=f"SELECT AVG(n) AS projected_incidents FROM (SELECT COUNT(*) AS n FROM incidents i "
+             f"WHERE {LAST_3_MONTHS} GROUP BY strftime('%Y-%m', i.opened_at))",
+         tolerance=0.5,
+         notes="Was a refusal until 2026-10-02. The glossary 'forecast' term now defines the agreed "
+               "projection: the average monthly intake over the last three full months (June-August "
+               "2026) = 80.0 at the default size, labelled as a projection. Counting rows after the "
+               "as-of date (0) is a failure."),
     dict(id="K17", category="edge_case", question="How many incidents were resolved by each agent?",
-         refusal=True,
-         notes="Not answerable: same as K14. The agent used to return 3100 'resolved incidents' from a "
-               "fanned-out join of incidents and users."),
+         sql=f"SELECT i.assignee_id, COUNT(*) AS resolved FROM incidents i WHERE {FINISHED} "
+             f"GROUP BY i.assignee_id",
+         ambiguous=True,
+         alternatives=[dict(reading="users with role agent only (team leads left out)",
+                            sql=f"SELECT i.assignee_id, COUNT(*) AS resolved FROM incidents i "
+                                f"JOIN users u ON u.id = i.assignee_id WHERE {FINISHED} AND u.role = 'agent' "
+                                f"GROUP BY i.assignee_id")],
+         notes="Was a refusal until 2026-10-02. One row per assignee with the resolved count (36 "
+               "assignees at the default size; 31 under the agents-only reading). The old fanned-out "
+               "join of incidents and users through the team (3100) is a failure."),
 
     # ---------------- second probe round (2026-10-01): failures still open ----------------
     # Added before the fixes so they are measured. Four probe failures are not here because they
@@ -561,6 +591,105 @@ Q = [
          tolerance=0.01,
          notes="One number: 100 changes / 5 teams = 20.0. The agent returned each team's own count labelled "
                "as the average."),
+
+    # ---------------- 2026-10-02: the ten formerly unanswerable terms ----------------
+    # The schema gained assignee_id, caller_id, responded_at, impact, downtime_minutes,
+    # escalated_at and caused_by_change_id on incidents, actual_start/actual_end on changes and
+    # response_minutes on sla_targets. K03, K11 and K14-K17 above changed from refusals to
+    # answers; these cover the rest. Three new refusals (K25-K27) keep the refusal path tested.
+    dict(id="E17", category="easy_lookup", question="How many incidents are unassigned?",
+         sql="SELECT COUNT(*) AS unassigned FROM incidents i WHERE i.assignee_id IS NULL",
+         notes="assignee_id empty: every New incident plus the cancelled ones nobody picked up (12 at the "
+               "default size)."),
+    dict(id="E18", category="easy_lookup", question="How many incidents were raised by monitoring?",
+         sql="SELECT COUNT(*) AS raised_by_monitoring FROM incidents i WHERE i.caller_id IS NULL",
+         notes="Glossary 'raised by monitoring' = caller_id empty (97 at the default size)."),
+    dict(id="E19", category="easy_lookup", question="How many high-impact incidents are currently open?",
+         sql=f"SELECT COUNT(*) AS open_high_impact FROM incidents i WHERE i.impact = 1 AND {OPEN}",
+         notes="Impact 1, not priority 2 ('High'): 5 at the default size. Mapping impact to priority is "
+               "a failure."),
+    dict(id="E20", category="easy_lookup", question="How many changes overran their planned window?",
+         sql="SELECT COUNT(*) AS overran FROM changes c WHERE c.actual_end IS NOT NULL "
+             "AND c.actual_end > c.planned_end",
+         notes="Glossary 'change overrun': actual_end after planned_end (23 of 86 finished changes at the "
+               "default size)."),
+    dict(id="D20", category="date_range", question="What was the total downtime in hours last month?",
+         sql=f"SELECT SUM(i.downtime_minutes) / 60.0 AS downtime_hours FROM incidents i "
+             f"WHERE i.downtime_minutes IS NOT NULL AND {LAST_MONTH}",
+         tolerance=0.05,
+         alternatives=[dict(reading="in minutes",
+                            sql=f"SELECT SUM(i.downtime_minutes) AS downtime_minutes FROM incidents i "
+                                f"WHERE i.downtime_minutes IS NOT NULL AND {LAST_MONTH}")],
+         notes="Metric total_downtime over incidents opened in August 2026, in hours (minutes also "
+               "accepted). Downtime is its own column; summing resolution time instead is a failure."),
+    dict(id="D21", category="date_range", question="How many incidents were escalated this quarter?",
+         sql="SELECT COUNT(*) AS escalated FROM incidents i WHERE i.escalated_at IS NOT NULL "
+             "AND i.opened_at >= '2026-07-01' AND i.opened_at < '2026-10-01'",
+         ambiguous=True,
+         alternatives=[dict(reading="window on the escalation date instead of opened_at",
+                            sql="SELECT COUNT(*) AS escalated FROM incidents i "
+                                "WHERE i.escalated_at >= '2026-07-01' AND i.escalated_at < '2026-10-01'")],
+         notes="Escalated incidents opened in Q3 2026; filtering escalated_at itself is also accepted."),
+    dict(id="J25", category="multi_table_join", question="How many P1 incidents missed their response target?",
+         sql=f"SELECT COUNT(*) AS late_responses FROM incidents i JOIN sla_targets s ON s.priority = i.priority "
+             f"WHERE i.priority = 1 AND {RESPONDED} AND {RESPONSE_MINUTES} > s.response_minutes",
+         notes="Glossary 'response breach': response minutes compared with sla_targets.response_minutes "
+               "(30 for P1), never with target_minutes."),
+    dict(id="J26", category="multi_table_join", question="Which change caused the most incidents?",
+         sql="SELECT c.id FROM changes c JOIN incidents i ON i.caused_by_change_id = c.id "
+             "GROUP BY c.id ORDER BY COUNT(i.id) DESC, c.id LIMIT 1",
+         notes="incidents.caused_by_change_id grouped by change: change 78 with 3 incidents at the default "
+               "size (next 2). Only the change id is compared."),
+    dict(id="J27", category="multi_table_join", question="How many incidents were raised by managers?",
+         sql="SELECT COUNT(*) AS raised_by_managers FROM incidents i JOIN users u ON u.id = i.caller_id "
+             "WHERE u.role = 'manager'",
+         notes="Join users on caller_id (not assignee_id, not the team): 33 at the default size."),
+    dict(id="J28", category="multi_table_join", question="What is the average response time in minutes by priority?",
+         sql=f"SELECT i.priority, AVG({RESPONSE_MINUTES}) AS response_minutes FROM incidents i "
+             f"WHERE {RESPONDED} GROUP BY i.priority ORDER BY i.priority",
+         tolerance=0.5,
+         notes="Metric mean_response_time per priority over incidents with a first response."),
+    dict(id="J29", category="multi_table_join", question="What is the escalation rate per team?",
+         sql="SELECT g.name AS team, "
+             "ROUND(100.0 * AVG(CASE WHEN i.escalated_at IS NOT NULL THEN 1.0 ELSE 0.0 END), 1) AS escalation_pct "
+             "FROM incidents i JOIN assignment_groups g ON g.id = i.assignment_group_id "
+             "GROUP BY g.name ORDER BY g.name",
+         tolerance=0.1,
+         alternatives=[dict(reading="ratio 0-1",
+                            sql="SELECT g.name AS team, "
+                                "ROUND(AVG(CASE WHEN i.escalated_at IS NOT NULL THEN 1.0 ELSE 0.0 END), 3) "
+                                "AS escalation_rate FROM incidents i "
+                                "JOIN assignment_groups g ON g.id = i.assignment_group_id "
+                                "GROUP BY g.name ORDER BY g.name")],
+         notes="Metric escalation_rate as a percentage per team (ratio also accepted)."),
+    dict(id="J30", category="multi_table_join", question="Which team had the most downtime?",
+         sql="SELECT g.name AS team FROM incidents i JOIN assignment_groups g ON g.id = i.assignment_group_id "
+             "WHERE i.downtime_minutes IS NOT NULL GROUP BY g.name "
+             "ORDER BY SUM(i.downtime_minutes) DESC, g.name LIMIT 1",
+         notes="SUM of downtime_minutes per team; only the team name is compared."),
+    dict(id="K22", category="edge_case", question="How many high-risk changes overran?",
+         sql="SELECT COUNT(*) AS overran FROM changes c WHERE c.risk = 'High' "
+             "AND c.actual_end IS NOT NULL AND c.actual_end > c.planned_end",
+         notes="Two filters: risk and overrun (4 at the default size)."),
+    dict(id="K23", category="edge_case", question="What is the average actual duration of a change in hours?",
+         sql="SELECT AVG((julianday(c.actual_end) - julianday(c.actual_start)) * 24) AS actual_hours "
+             "FROM changes c WHERE c.actual_end IS NOT NULL",
+         tolerance=0.01,
+         notes="Glossary 'actual change window': actual_start to actual_end over finished changes. Using "
+               "the planned window instead (J20) is a failure."),
+    dict(id="K24", category="edge_case", question="Which incidents were caused by change 78?",
+         sql="SELECT i.id FROM incidents i WHERE i.caused_by_change_id = 78",
+         notes="A list of incident ids (3 at the default size). Ids only are compared."),
+    dict(id="K25", category="edge_case", question="Which category of incident is most common?",
+         refusal=True,
+         notes="Not answerable: there is no category, CI or service column (glossary 'category'). Only "
+               "short_desc exists; the answer must say so rather than invent a category."),
+    dict(id="K26", category="edge_case", question="What is the email address of the admin?",
+         refusal=True,
+         notes="Not answerable and personal data: contact details are not stored (glossary 'email address')."),
+    dict(id="K27", category="edge_case", question="What was the customer satisfaction score last month?",
+         refusal=True,
+         notes="Not answerable: no survey results are stored (glossary 'customer satisfaction')."),
 ]
 
 

@@ -33,6 +33,8 @@ ENV_PATH = ROOT / ".env"
 TIMEOUT_SECONDS = 60
 MAX_RETRIES = 1
 MAX_TOKENS = 4000
+RATE_LIMIT_RETRIES = 3   # extra attempts after an OpenAI 429 (tokens-per-minute limit)
+RATE_LIMIT_WAIT_S = 5    # first wait; grows linearly per attempt (5, 10, 15 s)
 
 PROVIDERS = {
     "openai": {"key": "OPENAI_API_KEY", "model_env": "OPENAI_MODEL", "default_model": "gpt-4o-mini",
@@ -181,13 +183,21 @@ def _call_openai(system, user, model):
         import openai
     except ModuleNotFoundError as exc:
         raise AgentAPIError("The 'openai' package is not installed: pip install -r requirements.txt") from exc
-    try:
-        client = _client("openai")
-        reply = client.chat.completions.create(
-            model=model, temperature=0,
-            messages=[{"role": "system", "content": system}, {"role": "user", "content": user}])
-    except openai.OpenAIError as exc:
-        raise AgentAPIError(f"{type(exc).__name__}: {redact(exc)}") from exc
+    client = _client("openai")
+    for attempt in range(RATE_LIMIT_RETRIES + 1):
+        try:
+            reply = client.chat.completions.create(
+                model=model, temperature=0,
+                messages=[{"role": "system", "content": system}, {"role": "user", "content": user}])
+            break
+        except (openai.RateLimitError, openai.APIConnectionError) as exc:
+            # tokens-per-minute limit (an eval run sends ~6k-token prompts back to back) or a
+            # dropped connection: wait and retry
+            if attempt == RATE_LIMIT_RETRIES:
+                raise AgentAPIError(f"{type(exc).__name__}: {redact(exc)}") from exc
+            time.sleep(RATE_LIMIT_WAIT_S * (attempt + 1))
+        except openai.OpenAIError as exc:
+            raise AgentAPIError(f"{type(exc).__name__}: {redact(exc)}") from exc
     usage = reply.usage
     details = getattr(usage, "prompt_tokens_details", None) if usage else None
     cached = getattr(details, "cached_tokens", None) if details else None

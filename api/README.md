@@ -27,7 +27,7 @@ python -m uvicorn api.main:app --port 8000   # API only, from the project root
 | GET | `/api/kpis?date_from=&date_to=&group_id=` | headline KPIs and breakdowns by team, month, priority, status; upcoming changes |
 | GET | `/api/groups` | assignment groups |
 | GET | `/api/tables`, `/api/tables/{name}?f_<col>=&search=&sort=&desc=&page=&size=` | data explorer |
-| GET | `/api/incidents/{id}` | incident with SLA target, due time, resolution time, breach flag, % of target used and a timeline |
+| GET | `/api/incidents/{id}` | incident with SLA target, due time, resolution time, breach flag, % of target used, impact, assignee and caller (user id + role, never the name), first response and its target, escalation, downtime, the causing change, and a timeline |
 | GET | `/api/incidents/{id}/similar?limit=` | incidents with shared description words, same team or priority, ranked |
 | POST | `/api/feedback` | `{request_id, rating: up|down, question?, comment?}` → recorded in the audit log |
 | GET | `/api/catalog/{tables,columns,joins,metrics,glossary}` | the semantic catalog |

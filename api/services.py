@@ -265,17 +265,30 @@ def browse(conn, table, filters=None, search=None, sort=None, descending=False, 
 def incident(conn, incident_id):
     row = conn.execute(
         "SELECT i.*, g.name AS assignment_group, s.target_minutes, "
+        "s.response_minutes AS response_target_minutes, "
         f"{DIALECT.minutes_between('i.resolved_at', 'i.opened_at')} AS resolution_minutes, "
-        "datetime(i.opened_at, '+' || s.target_minutes || ' minutes') AS sla_due_at "
+        f"{DIALECT.minutes_between('i.responded_at', 'i.opened_at')} AS response_minutes, "
+        "datetime(i.opened_at, '+' || s.target_minutes || ' minutes') AS sla_due_at, "
+        "a.role AS assignee_role, k.role AS caller_role "
         "FROM incidents i JOIN assignment_groups g ON g.id = i.assignment_group_id "
-        "JOIN sla_targets s ON s.priority = i.priority WHERE i.id = ?", (incident_id,)).fetchone()
+        "JOIN sla_targets s ON s.priority = i.priority "
+        "LEFT JOIN users a ON a.id = i.assignee_id LEFT JOIN users k ON k.id = i.caller_id "
+        "WHERE i.id = ?", (incident_id,)).fetchone()
     if row is None:
         return None
-    out = dict(row)
+    out = dict(row)  # people appear as id + role only; users.name is never read
     as_of = catalog_as_of(conn)
     minutes = out["resolution_minutes"]
     out["resolution_minutes"] = _round(minutes)
     out["sla_breached"] = None if minutes is None else minutes > out["target_minutes"]
+    response = out["response_minutes"]
+    out["response_minutes"] = _round(response)
+    out["response_breached"] = None if response is None else response > out["response_target_minutes"]
+    out["caused_by_change"] = None
+    if out["caused_by_change_id"] is not None:
+        change = conn.execute("SELECT id, description, risk, status, planned_start FROM changes "
+                              "WHERE id = ?", (out["caused_by_change_id"],)).fetchone()
+        out["caused_by_change"] = dict(change) if change else None
     if minutes is None and out["status"] in ("New", "In Progress", "On Hold"):
         age = conn.execute(f"SELECT {DIALECT.minutes_between('?', '?')}",
                            (f"{as_of} 00:00:00", out["opened_at"])).fetchone()[0]
@@ -285,6 +298,10 @@ def incident(conn, incident_id):
     out["target_used_pct"] = None if elapsed is None else _round(100 * elapsed / out["target_minutes"])
     events = [{"event": "Opened", "at": out["opened_at"]},
               {"event": "SLA due", "at": out["sla_due_at"]}]
+    if out["responded_at"]:
+        events.append({"event": "First response", "at": out["responded_at"]})
+    if out["escalated_at"]:
+        events.append({"event": "Escalated", "at": out["escalated_at"]})
     if out["resolved_at"]:
         events.append({"event": out["status"], "at": out["resolved_at"]})
     elif out["status"] in ("New", "In Progress", "On Hold"):
