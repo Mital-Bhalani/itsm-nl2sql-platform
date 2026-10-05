@@ -1,0 +1,1343 @@
+# Build playbook (machine file). The human guide is docs/playbook/build-playbook-guide.md.
+# Claude Code reads this file, fills the profile, then runs the steps in order.
+# Every step has the same keys. Angle-bracket names such as <DB_FILE> come from the profile.
+# <SCRATCH> is the session scratchpad outside the repo.
+
+playbook:
+  id: build-playbook
+  version: "1.0.0"
+  schema_version: 1
+  executor: claude-code
+  human_guide: docs/playbook/build-playbook-guide.md
+  criteria_count: 80
+  criteria_ids: AC-01..AC-80
+  global_rules:
+    - Fill every profile value before step P0-S01. Do not guess a value. Ask the human.
+    - Run every Python command with `python -B`.
+    - Run every step in order. Do not skip a step. A step with `when: LLM_QUERY_PATH` runs only when the profile sets LLM_QUERY_PATH to true.
+    - Stop at the first step whose pass_check fails, unless its on_fail says repeat_once or ask_human.
+    - Create only the files that a step names. Put temporary files in <SCRATCH>.
+    - Never print the contents of .env or any key. Redact keys in every log line.
+    - Do not commit and do not push unless the human asks.
+    - After each step, append one line to <SCRATCH>/run-log.md with the step id, PASS or FAIL, and the time.
+
+profile:
+  DOMAIN: ""                 # short name of the business area, used in file names
+  FACT_TABLE: ""             # the table with one row per record to assess or query
+  DIMENSION_TABLES: []       # lookup tables joined to the fact table
+  KEY_METRIC: ""             # the one number the business asks for most
+  BUSINESS_TERM: ""          # one term the business uses that needs a definition
+  RULE_FAMILIES: []          # families of deterministic rules or metrics, for example C1..C7
+  DECISION_VOCABULARY: []    # the only words a decision output may use; empty when there is no decision
+  RESERVED_ACTIONS: []       # actions the system must never do or emit, for example approve a payment
+  NAMED_HUMAN_ROLE: ""       # the role of the person who makes the decision
+  AS_OF_DATE: ""             # fixed "today" for the data and the catalog, YYYY-MM-DD
+  DB_FILE: db/<DOMAIN>.sqlite
+  LLM_QUERY_PATH: true       # true = free-text questions become SQL; false = rules only
+
+phases:
+  - {id: P0, name: Setup, gate: all steps pass}
+  - {id: P1, name: Data layer, gate: all steps pass}
+  - {id: P2, name: Semantic catalog, gate: all steps pass}
+  - {id: P3, name: Naive spike, gate: all steps pass}
+  - {id: P4, name: Golden set and scoring, gate: all steps pass}
+  - {id: P5, name: Engine and LLM assist, gate: all steps pass}
+  - {id: P6, name: Live evals and probe rounds, gate: all steps pass}
+  - {id: P7, name: API, gate: all steps pass}
+  - {id: P8, name: UI, gate: all steps pass}
+  - {id: P9, name: Tests, gate: all steps pass}
+  - {id: P10, name: Security hardening, gate: all steps pass}
+  - {id: P11, name: CI, docs and handover, gate: all steps pass}
+
+steps:
+
+  # ---------------------------------------------------------------- P0 Setup
+
+  - id: P0-S01
+    phase: P0
+    title: Create the repo skeleton and the working rules
+    goal: Give the project one folder per layer and one memory file with the rules.
+    when: always
+    preconditions: [profile is complete]
+    inputs: [profile]
+    actions:
+      - type: create_file
+        path: CLAUDE.md
+        content_spec: >-
+          Sections: what this is, build and run commands in order, working rules
+          (create only the files asked for; no __pycache__ or side files; temp files
+          outside the repo; change one definition, show the diff, then roll it out;
+          flag ambiguity instead of guessing), folder map, key definitions, open items.
+      - type: run
+        cmd: "mkdir db semantics agent evals api web tests docs"
+      - type: create_file
+        path: .gitignore
+        content_spec: ".env, *.sqlite, logs/, __pycache__/, node_modules/, web/dist/"
+    expected_outputs:
+      - CLAUDE.md with a "Working rules" section.
+      - Eight empty folders.
+    pass_check:
+      - {type: file_exists, path: CLAUDE.md}
+      - {type: command_exit_code, cmd: "grep -c 'Working rules' CLAUDE.md", expect: 0}
+    on_fail: stop
+    satisfies: [AC-01]
+    example: >-
+      For a one-month register of records with rule families C1..C7, the working rules
+      also say: the system prepares and recommends; a named person decides.
+
+  - id: P0-S02
+    phase: P0
+    title: Pin every dependency
+    goal: Make the environment reproducible on every machine.
+    when: always
+    preconditions: [P0-S01 passed]
+    inputs: [requirements.txt]
+    actions:
+      - type: create_file
+        path: requirements.txt
+        content_spec: "One line per package, each with == and an exact version. No ranges."
+      - type: run
+        cmd: "pip install -r requirements.txt"
+      - type: run
+        cmd: "pip check"
+    expected_outputs:
+      - pip check prints "No broken requirements found."
+    pass_check:
+      - {type: command_exit_code, cmd: "grep -vE '^[A-Za-z0-9_.-]+==[0-9][^ ]*$' requirements.txt | grep -v '^#' | grep -c .", expect_stdout: "0"}
+      - {type: command_exit_code, cmd: "pip check", expect: 0}
+    on_fail: stop
+    satisfies: [AC-02, AC-03]
+
+  - id: P0-S03
+    phase: P0
+    title: Keep secrets out of the repo
+    goal: Make sure no key can reach git or a log.
+    when: always
+    preconditions: [P0-S01 passed]
+    inputs: [.gitignore]
+    actions:
+      - type: create_file
+        path: .env.example
+        content_spec: "Names of the environment variables only, with empty values."
+      - type: edit_file
+        path: CLAUDE.md
+        content_spec: "Rule: never print or commit .env; redact keys in error text."
+      - type: run
+        cmd: "git check-ignore .env"
+    expected_outputs:
+      - git check-ignore prints ".env".
+    pass_check:
+      - {type: command_exit_code, cmd: "git check-ignore .env", expect: 0}
+      - {type: command_exit_code, cmd: "git log -p --all | grep -ciE 'sk-[A-Za-z0-9]{20,}|api[_-]?key *= *[A-Za-z0-9]{16,}'", expect_stdout: "0"}
+    on_fail: stop
+    satisfies: [AC-04]
+
+  - id: P0-S04
+    phase: P0
+    title: Pin the as-of date as one build setting
+    goal: Make "today" a setting, so the data and every answer agree.
+    when: always
+    preconditions: [P0-S01 passed]
+    inputs: [profile.AS_OF_DATE]
+    actions:
+      - type: record
+        target: CLAUDE.md
+        content_spec: "AS_OF_DATE = <AS_OF_DATE>. The generator, the catalog and the engine read it. No file hard-codes the real clock."
+    expected_outputs:
+      - One source of the as-of date, named in CLAUDE.md.
+    pass_check:
+      - {type: count_equals, cmd: "grep -rl '<AS_OF_DATE>' --include=*.py --include=*.sql . | wc -l", expect: "1"}
+    on_fail: stop
+    satisfies: [AC-05]
+
+  # ---------------------------------------------------------------- P1 Data layer
+
+  - id: P1-S01
+    phase: P1
+    title: Write the schema with its definitions in the header
+    goal: Define the tables, the allowed values and the business definitions in one file.
+    when: always
+    preconditions: [P0 passed]
+    inputs: [profile.FACT_TABLE, profile.DIMENSION_TABLES, profile.RULE_FAMILIES]
+    actions:
+      - type: create_file
+        path: db/schema.sql
+        content_spec: >-
+          Header comment: one paragraph per business definition, one line per rule family,
+          at least three example questions. Tables: STRICT; a CHECK list for every
+          status or category column; a FOREIGN KEY for every reference; one TEXT timestamp
+          format in UTC. Do not store derived facts as columns.
+    expected_outputs:
+      - db/schema.sql with a header comment and STRICT tables.
+    pass_check:
+      - {type: command_exit_code, cmd: "test $(grep -c 'CREATE TABLE' db/schema.sql) -eq $(grep -c ') STRICT' db/schema.sql)", expect: 0}
+      - {type: command_exit_code, cmd: "grep -c 'CHECK' db/schema.sql", expect: 0}
+    on_fail: stop
+    satisfies: [AC-06, AC-07, AC-08]
+    example: >-
+      The header defines what makes a record a candidate, a hold or a case to
+      investigate, and says that the decision is made by a named person, not stored.
+
+  - id: P1-S02
+    phase: P1
+    title: Write the deterministic data generator
+    goal: Produce the same synthetic data on every run, with known facts planted.
+    when: always
+    preconditions: [P1-S01 passed]
+    inputs: [db/schema.sql, profile.AS_OF_DATE]
+    actions:
+      - type: create_file
+        path: db/seed.py
+        content_spec: >-
+          random.Random with a fixed seed; NOW = <AS_OF_DATE>; delete and recreate <DB_FILE>
+          from db/schema.sql; arguments --rows and --out for size; plant at least one
+          record per rule family that triggers it and one that does not; print the row
+          count of every table and each planted fact. Never read the real clock.
+      - type: run
+        cmd: "python -B db/seed.py"
+    expected_outputs:
+      - <DB_FILE> exists; stdout lists row counts and planted facts.
+    pass_check:
+      - {type: file_exists, path: <DB_FILE>}
+      - {type: command_exit_code, cmd: "grep -cE 'datetime\\.now|date\\.today|time\\.time' db/seed.py", expect_stdout: "0"}
+    on_fail: stop
+    satisfies: [AC-09, AC-10]
+
+  - id: P1-S03
+    phase: P1
+    title: Turn foreign keys on and check integrity
+    goal: Make every connection enforce references, and prove the data is clean.
+    when: always
+    preconditions: [P1-S02 passed]
+    inputs: [<DB_FILE>]
+    actions:
+      - type: run
+        cmd: "python -B -c \"import sqlite3;c=sqlite3.connect('<DB_FILE>');c.execute('PRAGMA foreign_keys=ON');print(c.execute('PRAGMA foreign_key_check').fetchall(), c.execute('PRAGMA integrity_check').fetchone()[0])\""
+    expected_outputs:
+      - "[] ok"
+    pass_check:
+      - {type: stdout_regex, pattern: '^\[\] ok$'}
+    on_fail: stop
+    satisfies: [AC-11]
+
+  - id: P1-S04
+    phase: P1
+    title: Verify byte-identical regeneration
+    goal: Prove the generator is deterministic, so evals and CI can trust the data.
+    when: always
+    preconditions: [P1-S02 passed, P1-S03 passed]
+    inputs: [db/seed.py, db/schema.sql]
+    actions:
+      - type: run
+        cmd: "python -B db/seed.py --out <SCRATCH>/a.sqlite"
+      - type: run
+        cmd: "python -B db/seed.py --out <SCRATCH>/b.sqlite"
+      - type: run
+        cmd: "python -B -c \"import hashlib,sys;print(*(hashlib.sha256(open(p,'rb').read()).hexdigest() for p in sys.argv[1:]))\" <SCRATCH>/a.sqlite <SCRATCH>/b.sqlite"
+      - type: record
+        target: CLAUDE.md
+        content_spec: "One line under Sample data: seed value, as-of date, hash of the default build."
+    expected_outputs:
+      - Two identical SHA-256 digests on stdout.
+      - No new file inside the repo.
+    pass_check:
+      - {type: stdout_regex, pattern: '^([0-9a-f]{64}) \1$'}
+      - {type: command_exit_code, cmd: "git status --porcelain --untracked-files=all", expect_stdout_unchanged: true}
+    on_fail: stop
+    satisfies: [AC-12]
+    example: >-
+      Two builds of the one-month register give the same digest. If a build writes
+      the real clock into a row, the digests differ and the step stops.
+
+  - id: P1-S05
+    phase: P1
+    title: Record the reference facts
+    goal: Write down the planted facts that the golden set and the UI checks will reuse.
+    when: always
+    preconditions: [P1-S04 passed]
+    inputs: [seed stdout]
+    actions:
+      - type: record
+        target: CLAUDE.md
+        content_spec: >-
+          Section "Sample data": row counts; for each rule family the count of records
+          that trigger it; the value of <KEY_METRIC>; the SQL that reproduces each fact.
+    expected_outputs:
+      - A "Sample data" section with one fact per rule family.
+    pass_check:
+      - {type: command_exit_code, cmd: "grep -c 'Sample data' CLAUDE.md", expect: 0}
+    on_fail: stop
+    satisfies: [AC-13]
+
+  # ---------------------------------------------------------------- P2 Semantic catalog
+
+  - id: P2-S01
+    phase: P2
+    title: Design the catalog tables
+    goal: Decide the six meta tables that describe the data for the model and the API.
+    when: always
+    preconditions: [P1 passed]
+    inputs: [db/schema.sql]
+    actions:
+      - type: record
+        target: semantics/README.md
+        content_spec: >-
+          Tables: meta_tables (description, grain), meta_columns (type, nullability, keys,
+          allowed values, description, example, is_pii, is_ambiguous, note, synonyms),
+          meta_joins (one row per foreign key, cardinality, pitfalls), meta_metrics
+          (name, sql_expression, base_table, required_joins, filters, time_column, notes),
+          meta_glossary (term, kind, definition, sql_hint, synonyms, is_answerable),
+          meta_settings (as_of, dialect, built_at).
+    expected_outputs:
+      - semantics/README.md with the six table designs.
+    pass_check:
+      - {type: command_exit_code, cmd: "grep -c 'meta_settings' semantics/README.md", expect: 0}
+    on_fail: stop
+    satisfies: [AC-14]
+
+  - id: P2-S02
+    phase: P2
+    title: Build the catalog from the schema
+    goal: Read types, allowed values and foreign keys from the schema, not from memory.
+    when: always
+    preconditions: [P2-S01 passed]
+    inputs: [db/schema.sql, <DB_FILE>]
+    actions:
+      - type: create_file
+        path: semantics/build_catalog.py
+        content_spec: >-
+          Parse db/schema.sql for columns, CHECK lists and foreign keys. Merge drafted
+          descriptions from one dict per table. Write all six meta tables into <DB_FILE>.
+          Exit non-zero if a drafted column is not in the schema or a schema column has
+          no draft. Accept --db and the AS_OF_DATE setting.
+      - type: run
+        cmd: "python -B semantics/build_catalog.py"
+    expected_outputs:
+      - meta_columns has one row per data column.
+    pass_check:
+      - {type: sql_scalar_equals, db: <DB_FILE>, sql: "SELECT (SELECT COUNT(*) FROM meta_columns) = (SELECT COUNT(*) FROM pragma_table_list t, pragma_table_info(t.name) WHERE t.name NOT LIKE 'meta_%' AND t.name NOT LIKE 'sqlite_%')", expect: 1}
+    on_fail: stop
+    satisfies: [AC-15, AC-16]
+
+  - id: P2-S03
+    phase: P2
+    title: Write every metric and rule family as a SQL fragment
+    goal: Keep each formula in the catalog once. The engine and the API compose them.
+    when: always
+    preconditions: [P2-S02 passed]
+    inputs: [profile.RULE_FAMILIES, profile.KEY_METRIC]
+    actions:
+      - type: edit_file
+        path: semantics/build_catalog.py
+        content_spec: >-
+          One meta_metrics row per metric and one per rule family: sql_expression, base
+          table, joins, filters, time column, notes. A rule whose input column is not in
+          the schema gets status NOT ASSESSABLE in its notes and no sql_expression.
+      - type: run
+        cmd: "python -B semantics/build_catalog.py"
+    expected_outputs:
+      - meta_metrics has one row per rule family and per metric.
+    pass_check:
+      - {type: command_exit_code, cmd: "grep -rlE 'julianday\\(|CASE WHEN .* THEN 1' agent api | grep -v build_catalog | grep -c .", expect_stdout: "0"}
+      - {type: sql_scalar_equals, db: <DB_FILE>, sql: "SELECT COUNT(*) >= 1 FROM meta_metrics WHERE notes LIKE '%NOT ASSESSABLE%' OR sql_expression IS NOT NULL", expect: 1}
+    on_fail: stop
+    satisfies: [AC-17, AC-18]
+    example: >-
+      Each of C1..C7 is a fragment. A control that needs a goods-receipt column the
+      register does not have is written as NOT ASSESSABLE, not as a guess.
+
+  - id: P2-S04
+    phase: P2
+    title: Write the glossary with flags
+    goal: Give every business term one definition, and flag doubt, PII and gaps.
+    when: always
+    preconditions: [P2-S03 passed]
+    inputs: [profile.BUSINESS_TERM]
+    actions:
+      - type: edit_file
+        path: semantics/build_catalog.py
+        content_spec: >-
+          meta_glossary rows: term, kind, definition, sql_hint, synonyms. Set is_ambiguous
+          and a note where two readings exist. Set is_pii on name and contact columns in
+          meta_columns. Keep at least two terms with is_answerable = 0, so the refusal path
+          stays tested. Hold one vocabulary list in one Python constant.
+      - type: run
+        cmd: "python -B semantics/build_catalog.py"
+    expected_outputs:
+      - Glossary rows with flags.
+    pass_check:
+      - {type: sql_scalar_equals, db: <DB_FILE>, sql: "SELECT COUNT(*) >= 2 FROM meta_glossary WHERE is_answerable = 0", expect: 1}
+      - {type: sql_scalar_equals, db: <DB_FILE>, sql: "SELECT COUNT(*) = 0 FROM meta_columns WHERE is_ambiguous = 1 AND (ambiguity_note IS NULL OR ambiguity_note = '')", expect: 1}
+      - {type: sql_scalar_equals, db: <DB_FILE>, sql: "SELECT COUNT(*) >= 1 FROM meta_columns WHERE is_pii = 1", expect: 1}
+    on_fail: stop
+    satisfies: [AC-19, AC-20, AC-21]
+
+  - id: P2-S05
+    phase: P2
+    title: Add the catalog self-checks
+    goal: Make the build fail loudly when the catalog drifts from the data.
+    when: always
+    preconditions: [P2-S04 passed]
+    inputs: [semantics/build_catalog.py]
+    actions:
+      - type: edit_file
+        path: semantics/build_catalog.py
+        content_spec: >-
+          Checks that exit non-zero: every referenced column and metric exists; every
+          sql_hint and sql_expression executes with EXPLAIN; no synonym belongs to two
+          unflagged terms; every example value is in its CHECK list; meta_joins matches
+          the schema foreign keys.
+      - type: run
+        cmd: "python -B semantics/build_catalog.py"
+      - type: run
+        cmd: "python -B -c \"import sqlite3;c=sqlite3.connect('<DB_FILE>');[c.execute('EXPLAIN '+h) for (h,) in c.execute('SELECT sql_hint FROM meta_glossary WHERE sql_hint IS NOT NULL')];print('hints ok')\""
+    expected_outputs:
+      - Build exit 0; "hints ok".
+    pass_check:
+      - {type: command_exit_code, cmd: "python -B semantics/build_catalog.py", expect: 0}
+      - {type: stdout_regex, pattern: '^hints ok$'}
+    on_fail: stop
+    satisfies: [AC-22]
+
+  - id: P2-S06
+    phase: P2
+    title: Add term lookup with plural and variant handling
+    goal: Resolve "records", "high-risk items" and typed variants to one term.
+    when: always
+    preconditions: [P2-S05 passed]
+    inputs: [semantics/build_catalog.py]
+    actions:
+      - type: edit_file
+        path: semantics/build_catalog.py
+        content_spec: >-
+          find_term(conn, phrase): match names and synonyms case-insensitively, then with
+          each word made singular. A LOOKUP_CHECKS list of at least ten phrases that the
+          build verifies. Do not add plural synonyms to the glossary.
+      - type: run
+        cmd: "python -B semantics/build_catalog.py"
+    expected_outputs:
+      - Build prints the lookup check count and exit 0.
+    pass_check:
+      - {type: command_exit_code, cmd: "grep -c 'LOOKUP_CHECKS' semantics/build_catalog.py", expect: 0}
+      - {type: command_exit_code, cmd: "python -B semantics/build_catalog.py", expect: 0}
+    on_fail: stop
+    satisfies: [AC-23]
+
+  # ---------------------------------------------------------------- P3 Naive spike
+
+  - id: P3-S01
+    phase: P3
+    title: Run a naive spike with no context
+    goal: Show what the model does with no schema, no rules and no guardrails.
+    when: always
+    preconditions: [P2 passed]
+    inputs: [one hard-coded question]
+    actions:
+      - type: create_file
+        path: agent/naive_spike.py
+        content_spec: >-
+          Send one hard-coded question about <KEY_METRIC> to the model with no schema
+          context. Print the reply. Do not open the database. Do not run any SQL.
+      - type: run
+        cmd: "python -B agent/naive_spike.py"
+    expected_outputs:
+      - The raw model reply on stdout.
+    pass_check:
+      - {type: command_exit_code, cmd: "grep -cE 'sqlite3|connect\\(' agent/naive_spike.py", expect_stdout: "0"}
+    on_fail: ask_human
+    satisfies: [AC-24]
+    example: >-
+      Ask "which records in the register can be released?" with no context. Expect the
+      model to invent a table, invent a value threshold and do its own arithmetic.
+
+  - id: P3-S02
+    phase: P3
+    title: Record the failure modes
+    goal: Map each failure mode to the step that will fix it.
+    when: always
+    preconditions: [P3-S01 passed]
+    inputs: [spike stdout]
+    actions:
+      - type: record
+        target: CLAUDE.md
+        content_spec: >-
+          Table "Spike failure modes": failure mode, example from the reply, step id that
+          fixes it. At least three rows. Include any reserved action the model offered.
+    expected_outputs:
+      - A table with three or more rows, each with a step id.
+    pass_check:
+      - {type: count_equals, cmd: "awk '/Spike failure modes/,/^$/' CLAUDE.md | grep -cE '\\| *P[0-9]+-S[0-9]+'", expect: ">=3"}
+    on_fail: stop
+    satisfies: [AC-25, AC-26]
+
+  # ---------------------------------------------------------------- P4 Golden set and scoring
+
+  - id: P4-S01
+    phase: P4
+    title: Generate the golden set from reference SQL
+    goal: Make expected answers come from SQL that runs, never from typing.
+    when: always
+    preconditions: [P3 passed]
+    inputs: [CLAUDE.md Sample data, <DB_FILE>]
+    actions:
+      - type: create_file
+        path: evals/make_golden_set.py
+        content_spec: >-
+          A list of questions with id, question, reference_sql, notes (the planted fact),
+          optional order_matters, tolerance, alternatives, expect_refusal. Run each
+          reference_sql against the database and write expected rows to evals/golden_set.yaml.
+          Cover: easy lookups, date ranges, joins, edge cases with zero rows, one question
+          per rule family, at least two refusal questions.
+      - type: run
+        cmd: "python -B evals/make_golden_set.py"
+      - type: run
+        cmd: "python -B evals/make_golden_set.py --out <SCRATCH>/golden_again.yaml && cmp evals/golden_set.yaml <SCRATCH>/golden_again.yaml && echo same"
+    expected_outputs:
+      - evals/golden_set.yaml; "same".
+    pass_check:
+      - {type: stdout_regex, pattern: '^same$'}
+    on_fail: stop
+    satisfies: [AC-27]
+
+  - id: P4-S02
+    phase: P4
+    title: Add the self-test that needs no API key
+    goal: Prove the golden set agrees with the data before any model is called.
+    when: always
+    preconditions: [P4-S01 passed]
+    inputs: [evals/golden_set.yaml]
+    actions:
+      - type: create_file
+        path: evals/run_evals.py
+        content_spec: >-
+          --self-test scores each reference_sql against its expected rows. --golden picks
+          the file. --json prints a report object. Exit 2 when the provider cannot be
+          reached, so an outage does not count as wrong answers.
+      - type: run
+        cmd: "env -u OPENAI_API_KEY -u ANTHROPIC_API_KEY python -B evals/run_evals.py --self-test"
+    expected_outputs:
+      - N/N passed, where N is the question count.
+    pass_check:
+      - {type: stdout_regex, pattern: '(\d+)/\1 '}
+    on_fail: stop
+    satisfies: [AC-28]
+
+  - id: P4-S03
+    phase: P4
+    title: Write the scoring rules
+    goal: Score what matters, and accept what is legitimately different.
+    when: always
+    preconditions: [P4-S02 passed]
+    inputs: [evals/run_evals.py]
+    actions:
+      - type: edit_file
+        path: evals/run_evals.py
+        content_spec: >-
+          Order-insensitive unless order_matters; numeric tolerance; extra columns allowed
+          when a subset matches; alternatives accepted; a refusal question passes only on a
+          refusal. Statuses: pass, wrong_result, sql_error, unsafe, no_sql.
+      - type: run
+        cmd: "python -B -m pytest tests/test_scoring.py -p no:cacheprovider -q"
+    expected_outputs:
+      - Scoring tests pass, including one where a correct answer to a refusal question fails.
+    pass_check:
+      - {type: command_exit_code, cmd: "python -B -m pytest tests/test_scoring.py -p no:cacheprovider -q", expect: 0}
+    on_fail: stop
+    satisfies: [AC-29, AC-30, AC-31]
+
+  - id: P4-S04
+    phase: P4
+    title: Run a trap check with wrong SQL
+    goal: Prove the scorer catches wrong answers, not only right ones.
+    when: always
+    preconditions: [P4-S03 passed]
+    inputs: [evals/golden_set.yaml]
+    actions:
+      - type: run
+        cmd: "python -B <SCRATCH>/trap_check.py"
+        note: "The script feeds deliberately wrong SQL (wrong filter, wrong join, count instead of rate) to the scorer and prints caught/total."
+      - type: record
+        target: CLAUDE.md
+        content_spec: "Trap check result: caught/total, and why each miss is a golden-set limit, not a scorer bug."
+    expected_outputs:
+      - caught/total on stdout; misses explained in CLAUDE.md.
+    pass_check:
+      - {type: stdout_regex, pattern: '^caught (\d+)/(\d+)$'}
+    on_fail: ask_human
+    satisfies: [AC-32]
+
+  # ---------------------------------------------------------------- P5 Engine and LLM assist
+
+  - id: P5-S01
+    phase: P5
+    title: Build the deterministic engine
+    goal: Run every rule over every record in code, and emit only the allowed words.
+    when: always
+    preconditions: [P4 passed]
+    inputs: [meta_metrics, profile.DECISION_VOCABULARY, profile.RULE_FAMILIES]
+    actions:
+      - type: create_file
+        path: agent/engine.py
+        content_spec: >-
+          Read rule fragments from meta_metrics. For every record and every rule, write
+          one result row: record id, rule id, result, evidence values. Rules marked NOT
+          ASSESSABLE get that status and no result. Combine results into one decision per
+          record from <DECISION_VOCABULARY> only. No value threshold exempts a record from
+          a rule. All arithmetic in Python or SQL, never in model text.
+      - type: run
+        cmd: "python -B agent/engine.py --db <DB_FILE> --out <SCRATCH>/results.csv"
+    expected_outputs:
+      - results.csv with records x rules rows.
+    pass_check:
+      - {type: command_exit_code, cmd: "python -B -m pytest tests/test_engine.py -p no:cacheprovider -q", expect: 0}
+      - {type: command_exit_code, cmd: "grep -ciE 'threshold|ceiling|under_[0-9]' agent/engine.py", expect_stdout: "0"}
+    on_fail: stop
+    satisfies: [AC-33, AC-34, AC-35, AC-36]
+    example: >-
+      Every record in the one-month register gets C1..C7. The smallest record gets the
+      same rules as the largest. Output words: RELEASE-CANDIDATE, HOLD, INVESTIGATE,
+      and NOT ASSESSABLE for a rule the data cannot support.
+
+  - id: P5-S02
+    phase: P5
+    title: Resolve terms and refuse before any API call
+    goal: Stop a question the data cannot answer before it costs a call.
+    when: LLM_QUERY_PATH
+    preconditions: [P5-S01 passed]
+    inputs: [find_term]
+    actions:
+      - type: create_file
+        path: agent/nl2sql.py
+        content_spec: >-
+          translate(question): resolve phrases of one to four words, longest first, with
+          find_term. A term with is_answerable = 0 returns a refusal with no model call.
+      - type: run
+        cmd: "python -B -m pytest tests/test_guardrails.py -k refus -p no:cacheprovider -q"
+    expected_outputs:
+      - Refusal tests pass with the fake model counting zero calls.
+    pass_check:
+      - {type: command_exit_code, cmd: "python -B -m pytest tests/test_guardrails.py -k refus -p no:cacheprovider -q", expect: 0}
+    on_fail: stop
+    satisfies: [AC-37]
+
+  - id: P5-S03
+    phase: P5
+    title: Build the prompt from the catalog only
+    goal: Keep the schema out of the code, so a catalog change is the only change.
+    when: LLM_QUERY_PATH
+    preconditions: [P5-S02 passed]
+    inputs: [meta tables]
+    actions:
+      - type: edit_file
+        path: agent/nl2sql.py
+        content_spec: >-
+          build_context(conn) renders rules + meta_tables + meta_columns + meta_joins +
+          meta_metrics + meta_glossary + the terms found. Temperature 0. Ambiguous terms
+          produce a "-- assumption:" line in the SQL. The as-of date comes from
+          meta_settings.
+      - type: run
+        cmd: "grep -cE \"FROM <FACT_TABLE>|<FACT_TABLE>\\.\" agent/nl2sql.py"
+    expected_outputs:
+      - Zero matches, so no table name is in the agent source.
+    pass_check:
+      - {type: stdout_regex, pattern: '^0$'}
+      - {type: command_exit_code, cmd: "grep -c 'assumption' agent/nl2sql.py", expect: 0}
+    on_fail: stop
+    satisfies: [AC-38, AC-39]
+
+  - id: P5-S04
+    phase: P5
+    title: Add the hard SQL lint
+    goal: Block SQL that runs but is certainly wrong, after one repair.
+    when: LLM_QUERY_PATH
+    preconditions: [P5-S03 passed]
+    inputs: [meta_joins]
+    actions:
+      - type: edit_file
+        path: agent/nl2sql.py
+        content_spec: >-
+          lint_sql: EXPLAIN fails; unknown date modifier; two child tables joined in one
+          aggregate without a direct foreign key; a parent filter inside a LEFT JOIN ON.
+          On a finding, send the SQL and the finding back once. Still wrong: mark unsafe.
+      - type: run
+        cmd: "python -B -m pytest tests/test_sql_lint.py -p no:cacheprovider -q"
+    expected_outputs:
+      - Lint tests pass; the golden reference SQL lints clean.
+    pass_check:
+      - {type: command_exit_code, cmd: "python -B -m pytest tests/test_sql_lint.py -p no:cacheprovider -q", expect: 0}
+    on_fail: stop
+    satisfies: [AC-40]
+
+  - id: P5-S05
+    phase: P5
+    title: Add the soft question checks
+    goal: Repair SQL that does not match the question, but never block on a doubt.
+    when: LLM_QUERY_PATH
+    preconditions: [P5-S04 passed]
+    inputs: [agent/nl2sql.py]
+    actions:
+      - type: edit_file
+        path: agent/nl2sql.py
+        content_spec: >-
+          lint_question: a status filter nobody asked for; "list" answered with one
+          aggregate; a share of the grand total where a proportion was asked; an inverted
+          percentage; a window that starts at the as-of date instead of the first of the
+          period. One repair call at most. Never set unsafe.
+      - type: run
+        cmd: "python -B -m pytest tests/test_sql_lint.py -k soft -p no:cacheprovider -q"
+    expected_outputs:
+      - Soft lint tests pass; a test asserts at most one repair call.
+    pass_check:
+      - {type: command_exit_code, cmd: "python -B -m pytest tests/test_sql_lint.py -k soft -p no:cacheprovider -q", expect: 0}
+    on_fail: stop
+    satisfies: [AC-41]
+
+  - id: P5-S06
+    phase: P5
+    title: Add the execution guardrails
+    goal: Make it impossible for any SQL to write, leak PII or run away.
+    when: always
+    preconditions: [P5-S01 passed]
+    inputs: [meta_columns.is_pii]
+    actions:
+      - type: edit_file
+        path: agent/nl2sql.py
+        content_spec: >-
+          guard_sql: exactly one SELECT or WITH statement; write and admin keywords
+          rejected; LIMIT 1000 appended if missing. connect_readonly: mode=ro URI;
+          authorizer allow-list (SELECT, READ, FUNCTION, RECURSIVE), is_pii columns denied,
+          load_extension denied; SQLITE_LIMIT_LENGTH 1 MB; SQL length 100 KB; no ATTACH;
+          hard heap limit. run_sql: 5 s progress-handler timeout; fetchmany(MAX_ROWS).
+      - type: run
+        cmd: "python -B -m pytest tests/test_guardrails.py tests/test_security.py -p no:cacheprovider -q"
+    expected_outputs:
+      - Guardrail and security tests pass, including SELECT * on a PII table.
+    pass_check:
+      - {type: command_exit_code, cmd: "python -B -m pytest tests/test_guardrails.py tests/test_security.py -p no:cacheprovider -q", expect: 0}
+    on_fail: stop
+    satisfies: [AC-42, AC-43, AC-44]
+
+  - id: P5-S07
+    phase: P5
+    title: Add the provider layer
+    goal: Call any model through one function, with a model allow-list and safe errors.
+    when: always
+    preconditions: [P5-S06 passed]
+    inputs: [.env.example]
+    actions:
+      - type: create_file
+        path: agent/llm.py
+        content_spec: >-
+          complete(system, user, provider, model) -> reply with text, provider, model,
+          latency, tokens. allowed_models() from a constant plus an env list. Fallback
+          provider only when none was requested. Retry HTTP 429 up to three times. redact()
+          removes key fragments from error text. All failures raise one error type.
+      - type: run
+        cmd: "python -B -m pytest tests/test_providers.py -p no:cacheprovider -q"
+    expected_outputs:
+      - Provider tests pass with mocked clients.
+    pass_check:
+      - {type: command_exit_code, cmd: "python -B -m pytest tests/test_providers.py -p no:cacheprovider -q", expect: 0}
+    on_fail: stop
+    satisfies: [AC-45, AC-46]
+
+  - id: P5-S08
+    phase: P5
+    title: Fix the output contract
+    goal: Give the human a decision-ready record, and never let the system decide.
+    when: always
+    preconditions: [P5-S07 passed]
+    inputs: [profile.NAMED_HUMAN_ROLE, profile.RESERVED_ACTIONS, profile.DECISION_VOCABULARY]
+    actions:
+      - type: edit_file
+        path: agent/engine.py
+        content_spec: >-
+          Decision record: record id, rule results, evidence values, recommendation from
+          <DECISION_VOCABULARY>, field decided_by (<NAMED_HUMAN_ROLE>, empty until a person
+          fills it), decided_at. Model narrative, if any, passes two lints: every word of
+          the decision is in the vocabulary; every number in the text equals an engine value.
+          Any text that contains a <RESERVED_ACTIONS> verb as an action is rejected.
+      - type: run
+        cmd: "python -B -m pytest tests/test_engine.py -k contract -p no:cacheprovider -q"
+    expected_outputs:
+      - Contract tests pass; a reserved action in model text is rejected.
+    pass_check:
+      - {type: command_exit_code, cmd: "python -B -m pytest tests/test_engine.py -k contract -p no:cacheprovider -q", expect: 0}
+    on_fail: stop
+    satisfies: [AC-47, AC-48]
+    example: >-
+      The register that goes to the named person has, per record, the seven rule results,
+      the evidence and a recommendation. The system never writes "approved".
+
+  # ---------------------------------------------------------------- P6 Live evals and probe rounds
+
+  - id: P6-S01
+    phase: P6
+    title: Run the live eval at least twice
+    goal: Get a score you can trust. The model is not deterministic, even at temperature 0.
+    when: LLM_QUERY_PATH
+    preconditions: [P5 passed, API key present]
+    inputs: [evals/golden_set.yaml]
+    actions:
+      - type: run
+        cmd: "python -B evals/run_evals.py --json > <SCRATCH>/live1.json"
+      - type: run
+        cmd: "python -B evals/run_evals.py --json > <SCRATCH>/live2.json"
+      - type: record
+        target: CLAUDE.md
+        content_spec: "Both scores, provider, model, date, and the id of every failed question."
+    expected_outputs:
+      - Two JSON reports; scores recorded.
+    pass_check:
+      - {type: command_exit_code, cmd: "python -B -c \"import json;[json.load(open(p)) for p in ('<SCRATCH>/live1.json','<SCRATCH>/live2.json')]\"", expect: 0}
+    on_fail: ask_human
+    satisfies: [AC-49]
+
+  - id: P6-S02
+    phase: P6
+    title: Run a probe round and add failures to the set first
+    goal: Grow the golden set from real misses before any fix, so the fix is measured.
+    when: LLM_QUERY_PATH
+    preconditions: [P6-S01 passed]
+    inputs: [a list of new questions with separate reference SQL]
+    actions:
+      - type: run
+        cmd: "python -B evals/run_evals.py --golden <SCRATCH>/probe_set.yaml --json > <SCRATCH>/probe.json"
+      - type: edit_file
+        path: evals/make_golden_set.py
+        content_spec: "Add every failed probe question with its reference SQL and a note. Regenerate the golden set."
+      - type: run
+        cmd: "python -B evals/make_golden_set.py && git diff --stat evals/golden_set.yaml"
+    expected_outputs:
+      - The golden set grew by the number of probe failures.
+    pass_check:
+      - {type: command_exit_code, cmd: "git diff --quiet evals/golden_set.yaml", expect: 1}
+    on_fail: stop
+    satisfies: [AC-50]
+
+  - id: P6-S03
+    phase: P6
+    title: Fix narrowly and re-run the whole set
+    goal: Fix one cause at a time, and prove nothing else broke.
+    when: LLM_QUERY_PATH
+    preconditions: [P6-S02 passed]
+    inputs: [failed question ids]
+    actions:
+      - type: edit_file
+        path: semantics/build_catalog.py
+        content_spec: >-
+          Prefer a catalog note or a clause on an existing prompt rule. Avoid a new
+          standalone rule. Change one entry, show the before and after, then roll out.
+      - type: run
+        cmd: "python -B semantics/build_catalog.py && python -B evals/run_evals.py --self-test && python -B evals/run_evals.py --json > <SCRATCH>/after.json"
+    expected_outputs:
+      - Self-test 100%; the live score is equal or higher, with no new failure id.
+    pass_check:
+      - {type: command_exit_code, cmd: "python -B <SCRATCH>/compare_reports.py <SCRATCH>/live2.json <SCRATCH>/after.json", expect: 0}
+    on_fail: repeat_once
+    satisfies: [AC-51]
+
+  - id: P6-S04
+    phase: P6
+    title: Record the lesson
+    goal: Keep the cause, the change and the before and after scores where the next person reads.
+    when: always
+    preconditions: [P6-S03 passed or skipped]
+    inputs: [eval reports]
+    actions:
+      - type: record
+        target: CLAUDE.md
+        content_spec: >-
+          Per fix: question ids, root cause, catalog or rule entry changed, score before and
+          after, dataset sizes run. Keep the standing lesson: prompt rules outrank catalog
+          notes; a clause on an existing rule is safer than a new rule.
+    expected_outputs:
+      - An "Evals" section with one entry per fix.
+    pass_check:
+      - {type: command_exit_code, cmd: "grep -ciE 'before.*after|after.*before' CLAUDE.md", expect: 0}
+    on_fail: stop
+    satisfies: [AC-52]
+
+  # ---------------------------------------------------------------- P7 API
+
+  - id: P7-S01
+    phase: P7
+    title: Build a thin API that composes catalog fragments
+    goal: Serve numbers from the catalog, through a fresh read-only connection per request.
+    when: always
+    preconditions: [P5 passed]
+    inputs: [meta_metrics, agent/engine.py]
+    actions:
+      - type: create_file
+        path: api/main.py
+        content_spec: >-
+          Endpoints: /health, /api/overview, /api/kpis, /api/tables/{name} with allow-listed
+          column filters and bound values, /api/results (engine output), /api/ask when
+          LLM_QUERY_PATH, /api/sql through guard_sql, /api/reconcile, /api/catalog/{section}.
+          All take dataset=default|large. One connect_readonly per request,
+          check_same_thread False.
+      - type: create_file
+        path: api/services.py
+        content_spec: "KPI SQL composed from meta_metrics rows. No formula written in the API."
+      - type: run
+        cmd: "python -B -m pytest tests/test_api.py -p no:cacheprovider -q"
+    expected_outputs:
+      - API tests pass with the fake model and a temp database.
+    pass_check:
+      - {type: command_exit_code, cmd: "python -B -m pytest tests/test_api.py -p no:cacheprovider -q", expect: 0}
+      - {type: command_exit_code, cmd: "grep -cE 'julianday\\(|\\* 1440' api/services.py", expect_stdout: "0"}
+    on_fail: stop
+    satisfies: [AC-53, AC-54]
+
+  - id: P7-S02
+    phase: P7
+    title: Add the API key and the rate limit
+    goal: Gate every /api route, and limit by client, not by the key the client sends.
+    when: always
+    preconditions: [P7-S01 passed]
+    inputs: [api/main.py]
+    actions:
+      - type: edit_file
+        path: api/main.py
+        content_spec: >-
+          APP_API_KEY set -> X-API-Key required on /api/*, compared in constant time on
+          bytes. Rate limit per client IP and per bucket (ask, sql, evals, feedback,
+          decision), RATE_LIMIT_PER_MIN default 30, stored in a state store.
+      - type: run
+        cmd: "python -B -m pytest tests/test_security.py -k 'key or rate' -p no:cacheprovider -q"
+    expected_outputs:
+      - A test that rotates the API key is still rate limited.
+    pass_check:
+      - {type: command_exit_code, cmd: "python -B -m pytest tests/test_security.py -k 'key or rate' -p no:cacheprovider -q", expect: 0}
+    on_fail: stop
+    satisfies: [AC-55, AC-56]
+
+  - id: P7-S03
+    phase: P7
+    title: Add the audit log
+    goal: Keep one line per call, so a reviewer can see who asked what and what ran.
+    when: always
+    preconditions: [P7-S02 passed]
+    inputs: [api/main.py]
+    actions:
+      - type: edit_file
+        path: api/main.py
+        content_spec: >-
+          logs/audit.jsonl: request id, client, route, question or SQL hash, provider,
+          model, row count, status, duration. Keys redacted. logs/ is gitignored.
+      - type: run
+        cmd: "git check-ignore logs/audit.jsonl"
+    expected_outputs:
+      - git check-ignore prints logs/audit.jsonl.
+    pass_check:
+      - {type: command_exit_code, cmd: "git check-ignore logs/audit.jsonl", expect: 0}
+      - {type: command_exit_code, cmd: "python -B -m pytest tests/test_api.py -k audit -p no:cacheprovider -q", expect: 0}
+    on_fail: stop
+    satisfies: [AC-57]
+
+  - id: P7-S04
+    phase: P7
+    title: Add the model allow-list, job cap and state store
+    goal: Stop cost abuse and runaway jobs, and keep limits across processes.
+    when: always
+    preconditions: [P7-S03 passed]
+    inputs: [agent/llm.py]
+    actions:
+      - type: create_file
+        path: api/state.py
+        content_spec: "SQLite store (WAL) for rate-limit hits and background jobs. Stale running jobs older than 30 minutes marked failed."
+      - type: edit_file
+        path: api/main.py
+        content_spec: "Reject a model not in allowed_models() with 4xx. MAX_RUNNING_JOBS = 2, counted from the store."
+      - type: run
+        cmd: "python -B -m pytest tests/test_state.py tests/test_security.py -k 'model or job' -p no:cacheprovider -q"
+    expected_outputs:
+      - Tests pass.
+    pass_check:
+      - {type: command_exit_code, cmd: "python -B -m pytest tests/test_state.py tests/test_security.py -k 'model or job' -p no:cacheprovider -q", expect: 0}
+    on_fail: stop
+    satisfies: [AC-58]
+
+  - id: P7-S05
+    phase: P7
+    title: Add the human decision endpoint
+    goal: Record the decision of a named person, and reject anything else.
+    when: always
+    preconditions: [P7-S04 passed]
+    inputs: [profile.NAMED_HUMAN_ROLE, profile.DECISION_VOCABULARY]
+    actions:
+      - type: edit_file
+        path: api/main.py
+        content_spec: >-
+          POST /api/decision: record id, decision from <DECISION_VOCABULARY>, decided_by
+          (non-empty name), note. 422 when the name is empty or the word is outside the
+          vocabulary. The endpoint stores the decision and the evidence snapshot. No endpoint
+          does a <RESERVED_ACTIONS> action.
+      - type: run
+        cmd: "python -B -m pytest tests/test_api.py -k decision -p no:cacheprovider -q"
+    expected_outputs:
+      - 422 without a name; 422 for a word outside the vocabulary; 200 otherwise.
+    pass_check:
+      - {type: command_exit_code, cmd: "python -B -m pytest tests/test_api.py -k decision -p no:cacheprovider -q", expect: 0}
+    on_fail: stop
+    satisfies: [AC-59]
+    example: >-
+      The named reviewer posts HOLD for a record with a note. A post with no name, or
+      with the word "approved", is rejected.
+
+  # ---------------------------------------------------------------- P8 UI
+
+  - id: P8-S01
+    phase: P8
+    title: Build the UI against the API only
+    goal: Keep the browser away from the database and the model.
+    when: always
+    preconditions: [P7 passed]
+    inputs: [api/README.md]
+    actions:
+      - type: create_file
+        path: web/
+        content_spec: >-
+          React + TypeScript app with hash routes, same-origin API calls, served by the API
+          at /web/. Pages: Home, Results or Ask, Dashboard, Explorer, Record detail,
+          Catalog, Evals, Data check. No database driver in package.json.
+      - type: run
+        cmd: "cd web && npm ci && npm run lint && npm run build"
+    expected_outputs:
+      - web/dist built; lint clean.
+    pass_check:
+      - {type: command_exit_code, cmd: "grep -cE 'sqlite|better-sqlite|pg\"' web/package.json", expect_stdout: "0"}
+      - {type: file_exists, path: web/dist/index.html}
+    on_fail: stop
+    satisfies: [AC-60]
+
+  - id: P8-S02
+    phase: P8
+    title: Show the evidence beside every answer
+    goal: Let the person check the SQL or the rule result, not trust a sentence.
+    when: always
+    preconditions: [P8-S01 passed]
+    inputs: [web/src]
+    actions:
+      - type: edit_file
+        path: web/src
+        content_spec: >-
+          Every answer or decision row shows the SQL that ran or the rule results and
+          evidence values, with a copy button. Assumptions are shown as a labelled line.
+      - type: run
+        cmd: "cd web && npm run e2e -- --grep evidence"
+    expected_outputs:
+      - e2e finds the evidence block on every answer.
+    pass_check:
+      - {type: command_exit_code, cmd: "cd web && npm run e2e -- --grep evidence", expect: 0}
+    on_fail: stop
+    satisfies: [AC-61]
+
+  - id: P8-S03
+    phase: P8
+    title: Add the reconciliation page
+    goal: Compare every number the UI shows with SQL written separately from the catalog.
+    when: always
+    preconditions: [P8-S02 passed]
+    inputs: [db/schema.sql header definitions]
+    actions:
+      - type: edit_file
+        path: api/services.py
+        content_spec: >-
+          DIRECT_CHECKS: one check per number on screen, with SQL written from the schema
+          header definitions, not from meta_metrics. /api/reconcile returns match per check.
+      - type: edit_file
+        path: web/src
+        content_spec: "Data check page: a table of checks with UI value, direct value, match."
+      - type: run
+        cmd: "curl -sf http://127.0.0.1:8000/api/reconcile | python -B -c \"import sys,json;c=json.load(sys.stdin)['checks'];assert all(x['match'] for x in c),c;print(len(c),'of',len(c),'match')\""
+    expected_outputs:
+      - N of N match, on both datasets.
+    pass_check:
+      - {type: stdout_regex, pattern: '^(\d+) of \1 match$'}
+    on_fail: stop
+    satisfies: [AC-62, AC-63]
+
+  - id: P8-S04
+    phase: P8
+    title: Add feedback and the decision controls
+    goal: Capture what people think, and keep every reserved action off the screen.
+    when: always
+    preconditions: [P8-S03 passed]
+    inputs: [profile.RESERVED_ACTIONS]
+    actions:
+      - type: edit_file
+        path: web/src
+        content_spec: >-
+          Thumbs up or down per answer via POST /api/feedback. Decision controls offer
+          only <DECISION_VOCABULARY>, require the person's name, and post to /api/decision.
+          No button, link or menu item carries a <RESERVED_ACTIONS> verb.
+      - type: run
+        cmd: "cd web && npm run e2e -- --grep 'feedback|decision|reserved'"
+    expected_outputs:
+      - e2e: feedback stored; decision posted; zero controls with a reserved verb.
+    pass_check:
+      - {type: command_exit_code, cmd: "cd web && npm run e2e -- --grep 'feedback|decision|reserved'", expect: 0}
+    on_fail: stop
+    satisfies: [AC-64, AC-65]
+
+  # ---------------------------------------------------------------- P9 Tests
+
+  - id: P9-S01
+    phase: P9
+    title: Make the test suite run with no key and no side files
+    goal: Let anyone run the tests anywhere, and leave the repo clean.
+    when: always
+    preconditions: [P8 passed]
+    inputs: [tests/]
+    actions:
+      - type: create_file
+        path: tests/conftest.py
+        content_spec: >-
+          Fixture: temp database built with seed.py and build_catalog.py in a temp folder
+          outside the repo. Fixture: fake model that returns scripted SQL and counts calls.
+          Unset provider key variables for the session.
+      - type: run
+        cmd: "env -u OPENAI_API_KEY -u ANTHROPIC_API_KEY python -B -m pytest tests -p no:cacheprovider -q"
+      - type: run
+        cmd: "git status --porcelain --untracked-files=all"
+    expected_outputs:
+      - All tests pass; git status shows nothing new.
+    pass_check:
+      - {type: command_exit_code, cmd: "env -u OPENAI_API_KEY -u ANTHROPIC_API_KEY python -B -m pytest tests -p no:cacheprovider -q", expect: 0}
+      - {type: command_exit_code, cmd: "git status --porcelain --untracked-files=all", expect_stdout_unchanged: true}
+    on_fail: stop
+    satisfies: [AC-66, AC-67]
+
+  - id: P9-S02
+    phase: P9
+    title: Add a regression test for every bug and finding
+    goal: Make every fix stay fixed.
+    when: always
+    preconditions: [P9-S01 passed]
+    inputs: [CLAUDE.md bug list]
+    actions:
+      - type: edit_file
+        path: tests/
+        content_spec: >-
+          For each bug or security finding in CLAUDE.md, one test with a comment that
+          names it. The test fails on the code before the fix. One test asserts that every
+          golden reference_sql passes lint_sql.
+      - type: run
+        cmd: "python -B -m pytest tests -p no:cacheprovider -q"
+    expected_outputs:
+      - Count of findings in CLAUDE.md equals the count of tests tagged with a finding id.
+    pass_check:
+      - {type: command_exit_code, cmd: "test $(grep -cE '^- \\(?F[0-9]+' CLAUDE.md) -eq $(grep -rcE '# finding F[0-9]+' tests | awk -F: '{s+=$2} END {print s}')", expect: 0}
+      - {type: command_exit_code, cmd: "python -B -m pytest tests -k golden_lint -p no:cacheprovider -q", expect: 0}
+    on_fail: stop
+    satisfies: [AC-68, AC-69]
+
+  - id: P9-S03
+    phase: P9
+    title: Add end-to-end browser tests
+    goal: Prove the pages work against a real API started by the test run.
+    when: always
+    preconditions: [P9-S02 passed]
+    inputs: [web/]
+    actions:
+      - type: create_file
+        path: web/e2e/
+        content_spec: "Playwright suite that starts the API on its own port, loads every page, asks one question or opens one result, checks the reconciliation page."
+      - type: run
+        cmd: "cd web && npm run e2e"
+    expected_outputs:
+      - All e2e checks pass.
+    pass_check:
+      - {type: command_exit_code, cmd: "cd web && npm run e2e", expect: 0}
+    on_fail: repeat_once
+    satisfies: [AC-70]
+
+  # ---------------------------------------------------------------- P10 Security hardening
+
+  - id: P10-S01
+    phase: P10
+    title: Write the attack probe list
+    goal: Try to break the system before anyone else does.
+    when: always
+    preconditions: [P9 passed]
+    inputs: [api/README.md]
+    actions:
+      - type: record
+        target: <SCRATCH>/probes.md
+        content_spec: >-
+          At least one probe per class: SQL injection; prompt or key extraction; PII read
+          through SELECT * or a pragma function; server path leak; size bomb (zeroblob,
+          hex, LIMIT 3000000); rate-limit bypass by key rotation; model abuse (unknown
+          model, unlimited jobs); key echo in error text.
+    expected_outputs:
+      - A probe list with eight classes.
+    pass_check:
+      - {type: count_equals, cmd: "grep -cE '^## ' <SCRATCH>/probes.md", expect: ">=8"}
+    on_fail: stop
+    satisfies: [AC-71]
+
+  - id: P10-S02
+    phase: P10
+    title: Run the probes, fix, test, re-run
+    goal: Turn every finding into a fix and a test.
+    when: always
+    preconditions: [P10-S01 passed]
+    inputs: [<SCRATCH>/probes.md]
+    actions:
+      - type: run
+        cmd: "python -B <SCRATCH>/run_probes.py --base http://127.0.0.1:8000"
+      - type: edit_file
+        path: tests/test_security.py
+        content_spec: "One test per finding, named after it. Fix the code. Re-run the probes until zero findings."
+      - type: record
+        target: CLAUDE.md
+        content_spec: "Security hardening list: finding, fix, test name."
+    expected_outputs:
+      - Probe run reports zero findings; all tests pass.
+    pass_check:
+      - {type: stdout_regex, pattern: 'findings: 0$'}
+      - {type: command_exit_code, cmd: "python -B -m pytest tests/test_security.py -p no:cacheprovider -q", expect: 0}
+    on_fail: repeat_once
+    satisfies: [AC-72]
+
+  - id: P10-S03
+    phase: P10
+    title: Run the domain-rule probes
+    goal: Prove the business rules hold under pressure, not only the technical ones.
+    when: always
+    preconditions: [P10-S02 passed]
+    inputs: [profile.RESERVED_ACTIONS, profile.DECISION_VOCABULARY]
+    actions:
+      - type: run
+        cmd: "python -B <SCRATCH>/run_probes.py --base http://127.0.0.1:8000 --suite domain"
+        note: >-
+          Probes: ask the system to do each reserved action; ask for a decision word
+          outside the vocabulary; split one record into two smaller records and compare
+          rule results; ask for a rule to be skipped below a value.
+      - type: edit_file
+        path: tests/test_engine.py
+        content_spec: "Tests: reserved action refused; vocabulary enforced; split record gets the same rule results as the whole; no value exempts a rule."
+    expected_outputs:
+      - Zero domain findings; tests pass.
+    pass_check:
+      - {type: stdout_regex, pattern: 'findings: 0$'}
+      - {type: command_exit_code, cmd: "python -B -m pytest tests/test_engine.py -k 'reserved or split or vocabulary' -p no:cacheprovider -q", expect: 0}
+    on_fail: stop
+    satisfies: [AC-73, AC-74]
+    example: >-
+      One record split into two parts, each below any amount a person might name, gets
+      exactly the same C1..C7 results as the whole record.
+
+  - id: P10-S04
+    phase: P10
+    title: Write down the known limits and the exposure checklist
+    goal: Say what is not protected, so nobody assumes it is.
+    when: always
+    preconditions: [P10-S03 passed]
+    inputs: [CLAUDE.md]
+    actions:
+      - type: record
+        target: docs/security.md
+        content_spec: >-
+          Table threat / protection / where. Section "Known limits (accepted)". Numbered
+          "Checklist before exposing the app" with API key, non-local host rule, HTTPS,
+          log rotation, key rotation.
+    expected_outputs:
+      - docs/security.md with both sections.
+    pass_check:
+      - {type: command_exit_code, cmd: "grep -c 'Known limits' docs/security.md", expect: 0}
+      - {type: command_exit_code, cmd: "grep -c 'Checklist before' docs/security.md", expect: 0}
+    on_fail: stop
+    satisfies: [AC-75]
+
+  # ---------------------------------------------------------------- P11 CI, docs and handover
+
+  - id: P11-S01
+    phase: P11
+    title: Add CI that regenerates and self-tests without secrets
+    goal: Make every push prove the data, the catalog and the tests still agree.
+    when: always
+    preconditions: [P10 passed]
+    inputs: [.github/workflows/]
+    actions:
+      - type: create_file
+        path: .github/workflows/ci.yml
+        content_spec: >-
+          Python job: pip install, pip check, seed and catalog for each dataset size,
+          regenerate golden sets then git diff --exit-code, eval --self-test for each set,
+          pytest. Web job: npm ci, lint, build, start the API, curl /web/ and /api/reconcile
+          and assert every check matches. No secret in the workflow.
+      - type: run
+        cmd: "python -B evals/make_golden_set.py && git diff --exit-code -- evals/"
+    expected_outputs:
+      - git diff exit 0; workflow file has no secrets key.
+    pass_check:
+      - {type: command_exit_code, cmd: "git diff --exit-code -- evals/", expect: 0}
+      - {type: command_exit_code, cmd: "grep -c 'secrets\\.' .github/workflows/ci.yml", expect_stdout: "0"}
+    on_fail: stop
+    satisfies: [AC-76, AC-77]
+
+  - id: P11-S02
+    phase: P11
+    title: Update the documentation with the code
+    goal: Keep CLAUDE.md and the guide true on the day of handover.
+    when: always
+    preconditions: [P11-S01 passed]
+    inputs: [CLAUDE.md, docs/]
+    actions:
+      - type: edit_file
+        path: CLAUDE.md
+        content_spec: "Build and run commands in order; folder map; key definitions; open items; every count taken from a fresh run on this day."
+      - type: edit_file
+        path: docs/
+        content_spec: "One chapter per layer: data, catalog, engine, evals, API, UI, security, operations."
+    expected_outputs:
+      - Docs changed in the same commit as the last code change.
+    pass_check:
+      - {type: command_exit_code, cmd: "git diff --name-only HEAD~1 | grep -cE '^(CLAUDE\\.md|docs/)'", expect: 0}
+    on_fail: stop
+    satisfies: [AC-78]
+
+  - id: P11-S03
+    phase: P11
+    title: Scan for secrets and names before any push
+    goal: Keep keys, client names and employer names out of a shared repo.
+    when: always
+    preconditions: [P11-S02 passed]
+    inputs: [staged changes]
+    actions:
+      - type: run
+        cmd: "git diff --cached | grep -ciE 'sk-[A-Za-z0-9]{20,}|api[_-]?key *= *[A-Za-z0-9]{16,}|<CLIENT_OR_EMPLOYER_NAME>'"
+    expected_outputs:
+      - "0"
+    pass_check:
+      - {type: stdout_regex, pattern: '^0$'}
+    on_fail: stop
+    satisfies: [AC-79]
+
+  - id: P11-S04
+    phase: P11
+    title: Hand over with a run log and a named sign-off
+    goal: Give the named person a complete record and the final word.
+    when: always
+    preconditions: [P11-S03 passed]
+    inputs: [<SCRATCH>/run-log.md]
+    actions:
+      - type: record
+        target: docs/handover.md
+        content_spec: >-
+          Table: step id, PASS or FAIL, time. All 53 steps present and PASS. Table: AC id,
+          evidence (command and output or test name). A sign-off line with the name and
+          role of the <NAMED_HUMAN_ROLE>, the date, and the sentence "The system prepares
+          and recommends. I decide."
+      - type: ask_human
+        prompt: "Please read docs/handover.md and add your name, role and date to the sign-off line."
+    expected_outputs:
+      - docs/handover.md with 53 PASS rows, 80 AC rows and a signed line.
+    pass_check:
+      - {type: count_equals, cmd: "grep -cE '^\\| P[0-9]+-S[0-9]+ \\| PASS' docs/handover.md", expect: "53"}
+      - {type: count_equals, cmd: "grep -cE '^\\| AC-[0-9]{2} \\|' docs/handover.md", expect: "80"}
+      - {type: command_exit_code, cmd: "grep -cE 'Signed by: [A-Za-z]' docs/handover.md", expect: 0}
+    on_fail: ask_human
+    satisfies: [AC-80]
