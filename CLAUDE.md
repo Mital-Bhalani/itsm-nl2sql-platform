@@ -98,9 +98,11 @@ read-only · **SELECT-only** · auto-LIMIT · **no raw PII in output** (`users.n
 | `web/` | 4 | **done**: React 19 + TS + Tailwind 4 + TanStack Query + Recharts; built to `web/dist`, served at `/web/` |
 | `End-to-End/` | — | **done**: 11-chapter project guide (hierarchy, every script/component, request lifecycle, security, operations); update it when code changes |
 | `tests/` | — | **done**: pytest, 161 tests (guardrails, SQL lint, providers, dialect, API with a fake model, state store, security attacks) + `web/e2e` Playwright (22) |
+| `docs/playbook/` | — | **done** (2026-10-05): reusable build playbook for the next project: `build-playbook.yaml` (53 steps for Claude Code: profile placeholders, actions, pass checks, on-fail rules) + `build-playbook-guide.md` (same steps in ASD-STE100 + 80 acceptance criteria AC-01..AC-80). Domain-agnostic; change the YAML first, then the guide, keep ids and titles identical. `docs/images/` holds the README screenshots |
 
-`scripts/`, `docs/` and `spike/` from the original plan were not created: the data generator
+`scripts/` and `spike/` from the original plan were not created: the data generator
 lives in `db/seed.py` and the spike in `agent/naive_spike.py`. There is no `db/build_db.py`.
+`docs/` holds only `images/` and `playbook/` (no chapter docs; those live in `End-to-End/`).
 
 **Naive spike (`agent/naive_spike.py`)** — deliberately no schema context, no guardrails, no
 validation, no execution. Sends the hard-coded question "which assignment groups breached SLA
